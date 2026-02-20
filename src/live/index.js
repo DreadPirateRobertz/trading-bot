@@ -1,0 +1,301 @@
+// Live Data Integration
+// Connects Alpaca SSE + Binance WebSocket feeds to RealtimeTrader
+
+import { RealtimeTrader } from '../realtime/index.js';
+import { AlpacaConnector } from '../market-data/alpaca.js';
+import { BinanceConnector } from '../market-data/binance.js';
+import { RedditCrawler } from '../sentiment/reddit.js';
+import { NewsCrawler } from '../sentiment/news.js';
+import { scoreSentiment, aggregateScores } from '../sentiment/scorer.js';
+
+export class LiveTrader {
+  constructor({ config, onSignal, onTrade, onError, onStatus }) {
+    this.config = config;
+    this.onStatus = onStatus || (() => {});
+
+    // Initialize RealtimeTrader (paper trading engine underneath)
+    this.realtimeTrader = new RealtimeTrader({
+      initialBalance: config.trading.initialBalance,
+      symbols: config.trading.symbols,
+      lookback: config.trading.lookback,
+      positionSizerConfig: {
+        maxPositionPct: config.trading.maxPositionPct,
+        yoloThreshold: config.trading.yoloThreshold,
+      },
+      onSignal: onSignal || (() => {}),
+      onTrade: onTrade || (() => {}),
+      onError: onError || (() => {}),
+    });
+
+    // Exchange connectors for historical data seeding
+    this.alpaca = config.alpaca.keyId
+      ? new AlpacaConnector(config.alpaca)
+      : null;
+    this.binance = config.binance.apiKey
+      ? new BinanceConnector(config.binance)
+      : null;
+
+    // Sentiment crawlers
+    this.redditCrawler = config.reddit.clientId
+      ? new RedditCrawler(config.reddit)
+      : null;
+    this.newsCrawler = new NewsCrawler();
+
+    // State
+    this.wsConnections = [];
+    this.sentimentInterval = null;
+    this.running = false;
+    this.startTime = null;
+    this.signalLog = [];
+    this.tradeLog = [];
+    this.errorLog = [];
+  }
+
+  async seedHistoricalData() {
+    this.onStatus({ event: 'seeding', message: 'Loading historical data for indicators...' });
+
+    for (const symbol of this.config.trading.symbols) {
+      try {
+        let candles = null;
+
+        // Try Binance for crypto symbols
+        if (this.binance && symbol.endsWith('USDT')) {
+          const klines = await this.binance.getKlines(symbol, {
+            interval: '1m',
+            limit: this.config.trading.lookback + 50,
+          });
+          candles = klines;
+        }
+        // Try Alpaca for stock symbols
+        else if (this.alpaca) {
+          const bars = await this.alpaca.getBars(symbol, {
+            timeframe: '1Min',
+            limit: this.config.trading.lookback + 50,
+          });
+          candles = bars;
+        }
+
+        if (candles && candles.length > 0) {
+          for (const c of candles) {
+            this.realtimeTrader.feedPrice(symbol, {
+              open: c.open,
+              high: c.high,
+              low: c.low,
+              close: c.close,
+              volume: c.volume,
+              timestamp: c.timestamp || Date.now(),
+            });
+          }
+          this.onStatus({ event: 'seeded', symbol, candles: candles.length });
+        }
+      } catch (err) {
+        this.onStatus({ event: 'seed_error', symbol, error: err.message });
+      }
+    }
+  }
+
+  connectBinanceWS(WebSocketClass) {
+    const cryptoSymbols = this.config.trading.symbols.filter(s => s.endsWith('USDT'));
+    if (cryptoSymbols.length === 0) return null;
+
+    const streams = cryptoSymbols.map(s => `${s.toLowerCase()}@kline_1m`).join('/');
+    const url = `wss://stream.binance.com:9443/ws/${streams}`;
+    const ws = new WebSocketClass(url);
+
+    ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.e === 'kline' && msg.k.x) {
+          const k = msg.k;
+          this.realtimeTrader.feedPrice(msg.s, {
+            open: parseFloat(k.o),
+            high: parseFloat(k.h),
+            low: parseFloat(k.l),
+            close: parseFloat(k.c),
+            volume: parseFloat(k.v),
+            timestamp: k.T,
+          });
+        }
+      } catch (err) {
+        this.errorLog.push({ time: Date.now(), source: 'binance_ws', error: err.message });
+      }
+    });
+
+    ws.on('error', (err) => {
+      this.errorLog.push({ time: Date.now(), source: 'binance_ws', error: err.message });
+    });
+
+    ws.on('close', () => {
+      this.onStatus({ event: 'ws_closed', source: 'binance' });
+    });
+
+    this.wsConnections.push(ws);
+    return ws;
+  }
+
+  connectAlpacaWS(WebSocketClass) {
+    const stockSymbols = this.config.trading.symbols.filter(s => !s.endsWith('USDT'));
+    if (stockSymbols.length === 0 || !this.alpaca) return null;
+
+    const baseUrl = this.config.alpaca.paper
+      ? 'wss://stream.data.sandbox.alpaca.markets/v2/iex'
+      : 'wss://stream.data.alpaca.markets/v2/iex';
+
+    const ws = new WebSocketClass(baseUrl);
+
+    ws.on('open', () => {
+      // Authenticate
+      ws.send(JSON.stringify({
+        action: 'auth',
+        key: this.config.alpaca.keyId,
+        secret: this.config.alpaca.secretKey,
+      }));
+    });
+
+    ws.on('message', (data) => {
+      try {
+        const messages = JSON.parse(data.toString());
+        for (const msg of Array.isArray(messages) ? messages : [messages]) {
+          if (msg.T === 'success' && msg.msg === 'authenticated') {
+            // Subscribe to minute bars
+            ws.send(JSON.stringify({
+              action: 'subscribe',
+              bars: stockSymbols,
+            }));
+          } else if (msg.T === 'b') {
+            // Minute bar
+            this.realtimeTrader.feedPrice(msg.S, {
+              open: msg.o,
+              high: msg.h,
+              low: msg.l,
+              close: msg.c,
+              volume: msg.v,
+              timestamp: new Date(msg.t).getTime(),
+            });
+          }
+        }
+      } catch (err) {
+        this.errorLog.push({ time: Date.now(), source: 'alpaca_ws', error: err.message });
+      }
+    });
+
+    ws.on('error', (err) => {
+      this.errorLog.push({ time: Date.now(), source: 'alpaca_ws', error: err.message });
+    });
+
+    ws.on('close', () => {
+      this.onStatus({ event: 'ws_closed', source: 'alpaca' });
+    });
+
+    this.wsConnections.push(ws);
+    return ws;
+  }
+
+  async updateSentiment() {
+    for (const symbol of this.config.trading.symbols) {
+      try {
+        const scores = [];
+
+        // News sentiment
+        const articles = await this.newsCrawler.fetchAllFeeds();
+        const recent = this.newsCrawler.filterRecent(articles, 4);
+        const symbolArticles = recent.filter(a =>
+          (a.title + ' ' + (a.description || '')).toUpperCase().includes(symbol.replace('USDT', ''))
+        );
+        for (const article of symbolArticles) {
+          const s = scoreSentiment(article.title + ' ' + (article.description || ''));
+          scores.push(s);
+        }
+
+        // Reddit sentiment
+        if (this.redditCrawler) {
+          try {
+            const posts = await this.redditCrawler.scanSubreddits({ limit: 25 });
+            const mentions = this.redditCrawler.aggregateTickerMentions(posts);
+            const ticker = symbol.replace('USDT', '');
+            const mention = mentions.find(m => m.ticker === ticker);
+            if (mention) {
+              scores.push({ score: mention.score > 5 ? 2 : mention.score > 0 ? 1 : -1 });
+            }
+          } catch {
+            // Reddit auth may fail - continue without
+          }
+        }
+
+        if (scores.length > 0) {
+          const agg = aggregateScores(scores);
+          this.realtimeTrader.updateSentiment(symbol, agg);
+        }
+      } catch {
+        // Sentiment failures are non-critical
+      }
+    }
+  }
+
+  startSentimentLoop(intervalMs = 300000) {
+    // Update sentiment every 5 minutes by default
+    this.updateSentiment();
+    this.sentimentInterval = setInterval(() => this.updateSentiment(), intervalMs);
+  }
+
+  async start(WebSocketClass) {
+    this.running = true;
+    this.startTime = Date.now();
+
+    // Wrap callbacks to capture logs
+    const origOnSignal = this.realtimeTrader.onSignal;
+    this.realtimeTrader.onSignal = (analysis) => {
+      this.signalLog.push({ time: Date.now(), ...analysis });
+      if (this.signalLog.length > 1000) this.signalLog = this.signalLog.slice(-500);
+      origOnSignal(analysis);
+    };
+
+    const origOnTrade = this.realtimeTrader.onTrade;
+    this.realtimeTrader.onTrade = (trade) => {
+      this.tradeLog.push({ time: Date.now(), ...trade });
+      origOnTrade(trade);
+    };
+
+    // Seed historical data
+    await this.seedHistoricalData();
+
+    // Connect WebSockets
+    if (WebSocketClass) {
+      this.connectBinanceWS(WebSocketClass);
+      this.connectAlpacaWS(WebSocketClass);
+    }
+
+    // Start sentiment loop
+    this.startSentimentLoop();
+
+    this.onStatus({ event: 'started', symbols: this.config.trading.symbols });
+  }
+
+  stop() {
+    this.running = false;
+    for (const ws of this.wsConnections) {
+      try { ws.close(); } catch { /* ignore */ }
+    }
+    this.wsConnections = [];
+    if (this.sentimentInterval) {
+      clearInterval(this.sentimentInterval);
+      this.sentimentInterval = null;
+    }
+    this.onStatus({ event: 'stopped' });
+  }
+
+  getFullStatus() {
+    const traderStatus = this.realtimeTrader.getStatus();
+    return {
+      running: this.running,
+      startTime: this.startTime,
+      uptime: this.startTime ? Date.now() - this.startTime : 0,
+      portfolio: traderStatus.portfolio,
+      buffers: traderStatus.buffers,
+      recentSignals: this.signalLog.slice(-20),
+      recentTrades: this.tradeLog.slice(-50),
+      recentErrors: this.errorLog.slice(-20),
+      connections: this.wsConnections.length,
+    };
+  }
+}
