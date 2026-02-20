@@ -1,0 +1,16 @@
+{
+  "name": "trading-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aggressive crypto/traditional market trading bot with social media sentiment analysis",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "dev": "node src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "vitest": "^4.0.0"
+  }
+}
