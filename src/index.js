@@ -9,3 +9,8 @@ export { PositionSizer } from './signals/position-sizer.js';
 export { PaperTrader } from './paper-trading/index.js';
 export { Backtester, computeMaxDrawdown, computeSharpeRatio } from './backtest/index.js';
 export { RealtimeTrader } from './realtime/index.js';
+
+// Phase 3: Live data integration + monitoring
+export { loadConfig, validateConfig } from './config/index.js';
+export { LiveTrader } from './live/index.js';
+export { createDashboard } from './dashboard/index.js';
