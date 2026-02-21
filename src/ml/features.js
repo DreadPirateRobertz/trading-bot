@@ -104,6 +104,93 @@ export function generateTrainingData(candles, {
   return samples;
 }
 
+// Extract features from a data-pipeline feature row (19 precomputed indicators)
+// Uses richer feature set than the basic extractFeatures function
+export function extractPipelineFeatures(row, candles) {
+  if (!row || row.rsi_14 === null) return null;
+
+  const price = row.close || (candles && candles.length > 0 ? candles[candles.length - 1].close : null);
+  if (!price) return null;
+
+  // Bollinger position
+  const bbRange = (row.bb_upper && row.bb_lower) ? row.bb_upper - row.bb_lower : 0;
+  const bbPos = bbRange > 0 ? (price - row.bb_lower) / bbRange : 0.5;
+
+  // SMA trend ratio (SMA20/SMA50 - 1, centered on 0)
+  const smaTrend = (row.sma_20 && row.sma_50 && row.sma_50 > 0)
+    ? (row.sma_20 / row.sma_50 - 1) : 0;
+
+  // EMA trend ratio
+  const emaTrend = (row.ema_12 && row.ema_26 && row.ema_26 > 0)
+    ? (row.ema_12 / row.ema_26 - 1) : 0;
+
+  // ATR as % of price (volatility measure)
+  const atrPct = (row.atr_14 && price > 0) ? row.atr_14 / price : 0;
+
+  // MACD histogram normalized by ATR
+  const macdNorm = (row.macd_histogram !== null && row.atr_14)
+    ? row.macd_histogram / (row.atr_14 + 1) : 0;
+
+  // MACD momentum normalized
+  const macdMomNorm = (row.macd_momentum !== null && row.atr_14)
+    ? row.macd_momentum / (row.atr_14 + 1) : 0;
+
+  return [
+    row.rsi_14 !== null ? row.rsi_14 / 100 : 0.5,                    // [0, 1] RSI
+    (row.rsi_divergence + 1) / 2,                                     // [0, 1] divergence
+    clamp(macdNorm, -1, 1) * 0.5 + 0.5,                              // [0, 1] MACD histogram
+    clamp(macdMomNorm, -1, 1) * 0.5 + 0.5,                           // [0, 1] MACD momentum
+    clamp(bbPos, 0, 1),                                               // [0, 1] BB position
+    clamp((row.bb_bandwidth || 0) / 0.2, 0, 1),                      // [0, 1] BB bandwidth
+    row.bb_squeeze || 0,                                              // {0, 1} BB squeeze
+    clamp((row.volume_profile || 1) / 3, 0, 1),                      // [0, 1] volume ratio
+    clamp(smaTrend * 10, -1, 1) * 0.5 + 0.5,                         // [0, 1] SMA trend
+    clamp(emaTrend * 10, -1, 1) * 0.5 + 0.5,                         // [0, 1] EMA trend
+    clamp(atrPct / 0.1, 0, 1),                                       // [0, 1] volatility
+    clamp((row.price_change_pct || 0) / 10, -1, 1) * 0.5 + 0.5,     // [0, 1] price change
+    clamp((row.sentiment_velocity || 0) / 5, -1, 1) * 0.5 + 0.5,    // [0, 1] sentiment vel
+  ];
+}
+
+// Generate training data from pipeline feature rows + candle history
+// Supports both 3-class (BUY/HOLD/SELL) and binary (UP/DOWN) modes
+export function generatePipelineTrainingData(candles, featureRows, {
+  warmup = 50,
+  horizon = 5,
+  buyThreshold = 0.02,
+  sellThreshold = -0.02,
+  mode = 'ternary', // 'ternary' or 'directional'
+} = {}) {
+  const samples = [];
+
+  for (let i = warmup; i < candles.length - horizon; i++) {
+    const row = featureRows[i];
+    if (!row || row.rsi_14 === null) continue;
+
+    const currentPrice = candles[i].close;
+    const futurePrice = candles[i + horizon].close;
+    const futureReturn = (futurePrice - currentPrice) / currentPrice;
+
+    let label;
+    if (mode === 'directional') {
+      // Binary: UP [1,0] or DOWN [0,1]
+      label = futureReturn >= 0 ? [1, 0] : [0, 1];
+    } else {
+      // Ternary: BUY/HOLD/SELL
+      if (futureReturn > buyThreshold) label = [1, 0, 0];
+      else if (futureReturn < sellThreshold) label = [0, 0, 1];
+      else label = [0, 1, 0];
+    }
+
+    const features = extractPipelineFeatures({ ...row, close: currentPrice }, null);
+    if (features) {
+      samples.push({ input: features, output: label, futureReturn });
+    }
+  }
+
+  return samples;
+}
+
 // Feature names for interpretability
 export const FEATURE_NAMES = [
   'rsi', 'macd_histogram', 'macd_signal', 'bollinger_position',
@@ -111,7 +198,14 @@ export const FEATURE_NAMES = [
   'return_10p', 'sentiment',
 ];
 
+export const PIPELINE_FEATURE_NAMES = [
+  'rsi_14', 'rsi_divergence', 'macd_histogram', 'macd_momentum',
+  'bb_position', 'bb_bandwidth', 'bb_squeeze', 'volume_profile',
+  'sma_trend', 'ema_trend', 'atr_pct', 'price_change_pct', 'sentiment_velocity',
+];
+
 export const NUM_FEATURES = 10;
+export const NUM_PIPELINE_FEATURES = 13;
 export const NUM_CLASSES = 3; // BUY, HOLD, SELL
 export const CLASS_NAMES = ['BUY', 'HOLD', 'SELL'];
 

@@ -161,6 +161,32 @@ export class NeuralNetwork {
     return history;
   }
 
+  // Train with class balancing via oversampling minority classes
+  trainBalanced(data, { epochs = 50, shuffle = true, onEpoch = null } = {}) {
+    // Group samples by class
+    const classes = {};
+    for (let i = 0; i < data.length; i++) {
+      const cls = data[i].output.indexOf(Math.max(...data[i].output));
+      if (!classes[cls]) classes[cls] = [];
+      classes[cls].push(i);
+    }
+
+    // Find max class size, oversample others to match
+    const maxSize = Math.max(...Object.values(classes).map(c => c.length));
+    const balanced = [];
+    for (const [cls, indices] of Object.entries(classes)) {
+      for (let i = 0; i < maxSize; i++) {
+        balanced.push(indices[i % indices.length]);
+      }
+    }
+
+    // Train on balanced dataset
+    return this.train(
+      balanced.map(i => data[i]),
+      { epochs, shuffle, onEpoch }
+    );
+  }
+
   // Evaluate on test data
   evaluate(data) {
     let correct = 0;
@@ -184,12 +210,32 @@ export class NeuralNetwork {
       }
     }
 
+    // Per-class precision, recall, F1
+    const perClass = {};
+    for (const cls of classes) {
+      const tp = confusion[cls][cls];
+      const fp = classes.reduce((s, c) => s + (c !== cls ? confusion[c][cls] : 0), 0);
+      const fn = classes.reduce((s, c) => s + (c !== cls ? confusion[cls][c] : 0), 0);
+      const precision = tp + fp > 0 ? tp / (tp + fp) : 0;
+      const recall = tp + fn > 0 ? tp / (tp + fn) : 0;
+      const f1 = precision + recall > 0 ? 2 * precision * recall / (precision + recall) : 0;
+      perClass[cls] = { precision, recall, f1, support: tp + fn };
+    }
+
+    // Directional accuracy: BUY or SELL predicted correctly (ignoring HOLD)
+    const directionalTotal = (confusion.BUY.BUY + confusion.BUY.HOLD + confusion.BUY.SELL)
+      + (confusion.SELL.BUY + confusion.SELL.HOLD + confusion.SELL.SELL);
+    const directionalCorrect = confusion.BUY.BUY + confusion.SELL.SELL;
+    const directionalAccuracy = directionalTotal > 0 ? directionalCorrect / directionalTotal : 0;
+
     return {
       accuracy: correct / data.length,
+      directionalAccuracy,
       loss: totalLoss / data.length,
       correct,
       total: data.length,
       confusion,
+      perClass,
     };
   }
 
