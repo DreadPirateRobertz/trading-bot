@@ -93,12 +93,11 @@ describe('PaperTrader stress tests', () => {
       expect(qty).toBe(50);
     });
 
-    it('calculatePositionSize with zero confidence falls back to 0.5 (bug: tb-1tl)', () => {
-      // BUG: uses || instead of ?? so confidence=0 becomes 0.5
+    it('calculatePositionSize with zero confidence returns zero (fixed: tb-1tl)', () => {
+      // FIXED: changed || to ?? so confidence=0 is now respected
       const trader = new PaperTrader({ initialBalance: 100_000 });
       const qty = trader.calculatePositionSize(100, { confidence: 0 });
-      // Should be 0 but is 50 due to falsy fallback: (0 || 0.5) = 0.5
-      expect(qty).toBe(50);
+      expect(qty).toBe(0);
     });
 
     it('calculatePositionSize uses 0.5 as default confidence', () => {

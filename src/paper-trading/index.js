@@ -12,12 +12,21 @@ export class PaperTrader {
   }
 
   get portfolioValue() {
-    // Requires current prices to be accurate — returns cash + position cost basis
+    // Uses last known market prices if available, falls back to cost basis
     let positionValue = 0;
-    for (const [, pos] of this.positions) {
-      positionValue += pos.qty * pos.avgPrice;
+    for (const [symbol, pos] of this.positions) {
+      const markPrice = this.lastPrices?.get(symbol) ?? pos.avgPrice;
+      positionValue += pos.qty * markPrice;
     }
     return this.cash + positionValue;
+  }
+
+  // Update mark-to-market prices for accurate portfolio valuation
+  updatePrices(priceMap) {
+    if (!this.lastPrices) this.lastPrices = new Map();
+    for (const [symbol, price] of Object.entries(priceMap)) {
+      this.lastPrices.set(symbol, price);
+    }
   }
 
   get pnl() {
@@ -31,7 +40,7 @@ export class PaperTrader {
   calculatePositionSize(price, signal) {
     const maxValue = this.portfolioValue * this.maxPositionPct;
     // Scale by confidence
-    const scaledMax = maxValue * (signal.confidence || 0.5);
+    const scaledMax = maxValue * (signal.confidence ?? 0.5);
     const qty = Math.floor(scaledMax / price);
     return Math.max(qty, 0);
   }

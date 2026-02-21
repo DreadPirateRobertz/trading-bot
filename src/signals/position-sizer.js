@@ -6,7 +6,7 @@ export class PositionSizer {
     maxPositionPct = 0.10,    // Max % of portfolio per trade
     maxYoloPct = 0.25,        // Max % for high-conviction trades
     yoloThreshold = 0.85,     // Confidence threshold for YOLO sizing
-    kellyFraction = 0.5,      // Half-Kelly for safety
+    kellyFraction = 0.33,     // One-third Kelly per STRATEGY-V2 (crypto estimation uncertainty)
     minPositionValue = 100,   // Minimum trade value in dollars
   } = {}) {
     this.maxPositionPct = maxPositionPct;
