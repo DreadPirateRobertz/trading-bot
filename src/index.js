@@ -23,3 +23,6 @@ export { createMcpServer, startMcpServer, TradingBotState } from './mcp/index.js
 
 // Phase 6: Portfolio risk management
 export { PortfolioRiskManager } from './risk/portfolio-risk-manager.js';
+
+// Phase 6: Multi-timeframe analysis
+export { MultiTimeframeAnalyzer } from './analysis/multi-timeframe.js';
