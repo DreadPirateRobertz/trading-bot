@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { SignalEngine } from '../signals/engine.js';
 import { PositionSizer } from '../signals/position-sizer.js';
 import { GaussianHMM } from '../ml/hmm.js';
-import { Backtester, PairsBacktester } from '../backtest/index.js';
+import { Backtester, PairsBacktester, monteCarloPermutation } from '../backtest/index.js';
 import { EnsembleStrategy } from '../strategies/ensemble.js';
 import { WalkForwardEvaluator } from '../ml/walk-forward-evaluator.js';
 import { MultiTimeframeAnalyzer } from '../analysis/multi-timeframe.js';
@@ -568,6 +568,33 @@ export function createServer(options = {}) {
             timeframeCount: analysis.timeframeCount,
             trends: analysis.trends,
           }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ─── Tool: run_monte_carlo ─────────────────────────────────────────
+  server.tool(
+    'run_monte_carlo',
+    'Run Monte Carlo permutation test on an equity curve to assess whether strategy ' +
+    'performance is statistically significant or could arise from random ordering of returns. ' +
+    'Returns p-value and percentile ranking.',
+    {
+      equityCurve: z.array(z.number()).min(10).describe('Equity curve values (portfolio value over time, minimum 10 points)'),
+      iterations: z.number().int().min(100).max(10000).optional()
+        .describe('Number of random permutations to run (default 1000)'),
+    },
+    async ({ equityCurve, iterations = 1000 }) => {
+      const result = monteCarloPermutation(equityCurve, { iterations });
+
+      if (result.error) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: result.error }) }] };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(result, null, 2),
         }],
       };
     },

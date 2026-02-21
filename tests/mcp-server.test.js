@@ -76,7 +76,8 @@ describe('MCP Server', () => {
       expect(names).toContain('run_pairs_backtest');
       expect(names).toContain('run_walk_forward');
       expect(names).toContain('analyze_multi_timeframe');
-      expect(names.length).toBe(11);
+      expect(names).toContain('run_monte_carlo');
+      expect(names.length).toBe(12);
     });
 
     it('each tool has a description', async () => {
@@ -625,6 +626,39 @@ describe('MCP Server', () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.confirmed).toBe(false);
       expect(data.adjustedConfidence).toBe(0);
+    });
+  });
+
+  describe('run_monte_carlo', () => {
+    it('runs Monte Carlo permutation test', async () => {
+      const { client } = await createTestPair();
+      // Build equity curve with upward trend
+      const equityCurve = [100000];
+      for (let i = 1; i <= 100; i++) {
+        equityCurve.push(equityCurve[i - 1] * (1 + 0.002 + Math.sin(i * 0.3) * 0.005));
+      }
+      const result = await client.callTool({
+        name: 'run_monte_carlo',
+        arguments: { equityCurve, iterations: 200 },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(typeof data.observedSharpe).toBe('number');
+      expect(typeof data.pValue).toBe('number');
+      expect(data.pValue).toBeGreaterThanOrEqual(0);
+      expect(data.pValue).toBeLessThanOrEqual(1);
+      expect(typeof data.percentile).toBe('number');
+      expect(data.iterations).toBe(200);
+      expect(typeof data.medianRandomSharpe).toBe('number');
+    });
+
+    it('works with minimum data (10 points)', async () => {
+      const { client } = await createTestPair();
+      const result = await client.callTool({
+        name: 'run_monte_carlo',
+        arguments: { equityCurve: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109] },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(typeof data.observedSharpe).toBe('number');
     });
   });
 });
