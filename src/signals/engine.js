@@ -1,33 +1,74 @@
 // Signal Engine
 // Orchestrates technical indicators + sentiment into unified confidence score per asset
+// Supports pluggable strategy backends: 'technical' (default), 'ensemble', 'momentum',
+// 'meanReversion', 'pairsTrading'
 
 import { computeRSI, computeMACD, computeBollingerBands, detectVolumeSpike, generateSignal } from './index.js';
+import { EnsembleStrategy } from '../strategies/ensemble.js';
+import { MomentumStrategy } from '../strategies/momentum.js';
+import { MeanReversionStrategy } from '../strategies/mean-reversion.js';
 
 export class SignalEngine {
-  constructor({ rsiPeriod = 14, macdParams, bollingerParams, volumeThreshold = 2 } = {}) {
+  constructor({
+    rsiPeriod = 14,
+    macdParams,
+    bollingerParams,
+    volumeThreshold = 2,
+    // Strategy backend: 'technical' (default), 'ensemble', 'momentum', 'meanReversion'
+    strategy = 'technical',
+    strategyConfig = {},
+  } = {}) {
     this.rsiPeriod = rsiPeriod;
     this.macdParams = macdParams || { fast: 12, slow: 26, signal: 9 };
     this.bollingerParams = bollingerParams || { period: 20, stdDev: 2 };
     this.volumeThreshold = volumeThreshold;
+    this.strategyName = strategy;
+
+    // Initialize strategy backend
+    if (strategy === 'ensemble') {
+      this.strategy = new EnsembleStrategy(strategyConfig);
+    } else if (strategy === 'momentum') {
+      this.strategy = new MomentumStrategy(strategyConfig);
+    } else if (strategy === 'meanReversion') {
+      this.strategy = new MeanReversionStrategy(strategyConfig);
+    } else {
+      this.strategy = null; // 'technical' — use built-in indicators
+    }
   }
 
   // Analyze a single asset given its OHLCV data and optional sentiment
-  analyze(symbol, { closes, volumes, currentPrice, sentiment } = {}) {
+  // candles: optional OHLCV array for strategy backends that need it (ensemble with ML/HMM)
+  analyze(symbol, { closes, volumes, currentPrice, sentiment, candles } = {}) {
     if (!closes || closes.length === 0) {
       return { symbol, error: 'No price data' };
     }
 
     const price = currentPrice ?? closes[closes.length - 1];
 
+    // Always compute technical indicators (used for diagnostics even with strategy backend)
     const rsi = computeRSI(closes, this.rsiPeriod);
     const macd = computeMACD(closes, this.macdParams);
     const bollinger = computeBollingerBands(closes, this.bollingerParams);
     const volumeSpike = volumes ? detectVolumeSpike(volumes, { threshold: this.volumeThreshold }) : false;
 
-    // Enhanced signal generation with Bollinger price context
-    const signal = generateSignalWithPrice({
-      rsi, macd, bollinger, volumeSpike, sentiment, price,
-    });
+    let signal;
+    if (this.strategy) {
+      // Use strategy backend
+      const strategyResult = this.strategy.generateSignal(closes, candles || null);
+      signal = {
+        action: strategyResult.action,
+        score: strategyResult.signal * 10, // Normalize [-1,1] to [-10,10] score range
+        confidence: strategyResult.confidence,
+        reasons: strategyResult.reasons || [],
+        strategy: this.strategyName,
+        ...(strategyResult.regime ? { regime: strategyResult.regime } : {}),
+      };
+    } else {
+      // Default: built-in technical indicator pipeline
+      signal = generateSignalWithPrice({
+        rsi, macd, bollinger, volumeSpike, sentiment, price,
+      });
+    }
 
     return {
       symbol,

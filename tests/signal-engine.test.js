@@ -75,6 +75,64 @@ describe('SignalEngine', () => {
     const hasSentimentReason = result.signal.reasons.some(r => r.includes('sentiment'));
     expect(hasSentimentReason).toBe(true);
   });
+
+  describe('strategy backends', () => {
+    it('uses ensemble strategy when configured', () => {
+      const engine = new SignalEngine({ strategy: 'ensemble' });
+      expect(engine.strategyName).toBe('ensemble');
+      expect(engine.strategy).toBeDefined();
+      const closes = makePrices(80);
+      const result = engine.analyze('BTC', { closes });
+      expect(result.signal.strategy).toBe('ensemble');
+      expect(['BUY', 'SELL', 'HOLD']).toContain(result.signal.action);
+      expect(result.signal.reasons.length).toBeGreaterThan(0);
+      // Technical indicators are still computed for diagnostics
+      expect(result.indicators.rsi).toBeDefined();
+    });
+
+    it('uses momentum strategy when configured', () => {
+      const engine = new SignalEngine({ strategy: 'momentum' });
+      expect(engine.strategyName).toBe('momentum');
+      const closes = makePrices(80, 100, 0.5);
+      const result = engine.analyze('ETH', { closes });
+      expect(result.signal.strategy).toBe('momentum');
+      expect(['BUY', 'SELL', 'HOLD']).toContain(result.signal.action);
+    });
+
+    it('uses mean reversion strategy when configured', () => {
+      const engine = new SignalEngine({ strategy: 'meanReversion' });
+      expect(engine.strategyName).toBe('meanReversion');
+      const closes = makePrices(80);
+      const result = engine.analyze('SOL', { closes });
+      expect(result.signal.strategy).toBe('meanReversion');
+      expect(['BUY', 'SELL', 'HOLD']).toContain(result.signal.action);
+    });
+
+    it('defaults to technical indicator pipeline', () => {
+      const engine = new SignalEngine();
+      expect(engine.strategyName).toBe('technical');
+      expect(engine.strategy).toBeNull();
+      const closes = makePrices(40);
+      const result = engine.analyze('AAPL', { closes });
+      // Technical pipeline doesn't add .strategy field
+      expect(result.signal.strategy).toBeUndefined();
+    });
+
+    it('ensemble includes regime detection info', () => {
+      const engine = new SignalEngine({ strategy: 'ensemble' });
+      const closes = makePrices(80);
+      const result = engine.analyze('BTC', { closes });
+      expect(result.signal.regime).toBeDefined();
+    });
+
+    it('passes strategyConfig to strategy constructor', () => {
+      const engine = new SignalEngine({
+        strategy: 'meanReversion',
+        strategyConfig: { entryZScore: 1.5 },
+      });
+      expect(engine.strategy.entryZScore).toBe(1.5);
+    });
+  });
 });
 
 describe('generateSignalWithPrice', () => {
