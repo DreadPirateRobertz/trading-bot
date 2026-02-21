@@ -11,7 +11,7 @@ import { BollingerBounceStrategy } from '../strategies/bollinger-bounce.js';
 import { MomentumStrategy } from '../strategies/momentum.js';
 import { PaperTrader } from '../paper-trading/index.js';
 import { PositionSizer } from '../signals/position-sizer.js';
-import { computeMaxDrawdown, computeSharpeRatio } from '../backtest/index.js';
+import { computeMaxDrawdown, computeSharpeRatio, computeSortinoRatio, computeCalmarRatio, ExecutionModel } from '../backtest/index.js';
 
 // Walk-forward training: expanding window, retrain every `retrainInterval` bars
 export class WalkForwardEvaluator {
@@ -27,11 +27,14 @@ export class WalkForwardEvaluator {
     minTrainSamples = 100, // minimum samples before first training
     mlWeight = 0.3,
     useHMM = true,
+    slippageBps = 5,    // execution cost: slippage in basis points
+    commissionBps = 10, // execution cost: commission in basis points
   } = {}) {
     this.config = {
       layers, learningRate, epochs, horizon,
       buyThreshold, sellThreshold, lookback,
       retrainInterval, minTrainSamples, mlWeight, useHMM,
+      slippageBps, commissionBps,
     };
   }
 
@@ -88,11 +91,42 @@ export class WalkForwardEvaluator {
     };
   }
 
+  _makeExecModel() {
+    const cfg = this.config;
+    if (cfg.slippageBps === 0 && cfg.commissionBps === 0) return null;
+    return new ExecutionModel({ slippageBps: cfg.slippageBps, commissionBps: cfg.commissionBps });
+  }
+
+  // Apply execution costs to a buy trade
+  _execBuy(trader, symbol, qty, price, execModel) {
+    if (!execModel) {
+      trader.buy(symbol, qty, price);
+      return;
+    }
+    const execPrice = execModel.getExecutionPrice('buy', price, { qty });
+    const commission = execModel.getCommission(execPrice, qty);
+    trader.buy(symbol, qty, execPrice);
+    if (commission > 0) trader.cash -= commission;
+  }
+
+  // Apply execution costs to a sell trade
+  _execSell(trader, symbol, qty, price, execModel) {
+    if (!execModel) {
+      trader.sell(symbol, qty, price);
+      return;
+    }
+    const execPrice = execModel.getExecutionPrice('sell', price, { qty });
+    const commission = execModel.getCommission(execPrice, qty);
+    trader.sell(symbol, qty, execPrice);
+    if (commission > 0) trader.cash -= commission;
+  }
+
   // ML-enhanced ensemble with walk-forward retraining
   _runMLEnsemble(candles, hmm, initialBalance) {
     const cfg = this.config;
     const trader = new PaperTrader({ initialBalance, maxPositionPct: 0.25 });
     const sizer = new PositionSizer({ maxPositionPct: 0.25, kellyFraction: 0.33 });
+    const execModel = this._makeExecModel();
     const equityCurve = [initialBalance];
     const lookback = Math.max(cfg.lookback + 26, 60);
     let model = null;
@@ -154,7 +188,7 @@ export class WalkForwardEvaluator {
         highWaterMark = Math.max(highWaterMark, currentPrice);
         const drawdownFromPeak = (highWaterMark - currentPrice) / highWaterMark;
         if (drawdownFromPeak >= 0.15) {
-          trader.sell('asset', pos.qty, currentPrice);
+          this._execSell(trader, 'asset', pos.qty, currentPrice, execModel);
           highWaterMark = 0;
           entryPrice = 0;
           equityCurve.push(trader.cash);
@@ -164,7 +198,7 @@ export class WalkForwardEvaluator {
         const profitFromEntry = (currentPrice - entryPrice) / entryPrice;
         if (profitFromEntry >= 0.25 && pos.qty > 1) {
           const halfQty = Math.floor(pos.qty / 2);
-          if (halfQty > 0) trader.sell('asset', halfQty, currentPrice);
+          if (halfQty > 0) this._execSell(trader, 'asset', halfQty, currentPrice, execModel);
         }
       }
 
@@ -176,14 +210,14 @@ export class WalkForwardEvaluator {
           confidence: signal.confidence,
         });
         if (sizing.qty > 0) {
-          trader.buy('asset', sizing.qty, currentPrice);
+          this._execBuy(trader, 'asset', sizing.qty, currentPrice, execModel);
           entryPrice = currentPrice;
           highWaterMark = currentPrice;
         }
       } else if (signal.action === 'SELL') {
         const currentPos = trader.getPosition('asset');
         if (currentPos) {
-          trader.sell('asset', currentPos.qty, currentPrice);
+          this._execSell(trader, 'asset', currentPos.qty, currentPrice, execModel);
           highWaterMark = 0;
           entryPrice = 0;
         }
@@ -197,16 +231,20 @@ export class WalkForwardEvaluator {
     // Close remaining
     const remainingPos = trader.getPosition('asset');
     if (remainingPos) {
-      trader.sell('asset', remainingPos.qty, candles[candles.length - 1].close);
+      this._execSell(trader, 'asset', remainingPos.qty, candles[candles.length - 1].close, execModel);
     }
 
-    return this._computeResults('ML-Ensemble', trader, equityCurve, initialBalance, { trainCount });
+    return this._computeResults('ML-Ensemble', trader, equityCurve, initialBalance, {
+      trainCount,
+      executionCosts: execModel ? round(execModel.totalSlippagePaid + execModel.totalCommissionPaid) : 0,
+    });
   }
 
   // Rules-only ensemble (no ML, but with HMM if available)
   _runRulesEnsemble(candles, hmm, initialBalance) {
     const trader = new PaperTrader({ initialBalance, maxPositionPct: 0.25 });
     const sizer = new PositionSizer({ maxPositionPct: 0.25, kellyFraction: 0.33 });
+    const execModel = this._makeExecModel();
     const equityCurve = [initialBalance];
     const lookback = 60;
     let highWaterMark = 0;
@@ -228,7 +266,7 @@ export class WalkForwardEvaluator {
       if (pos) {
         highWaterMark = Math.max(highWaterMark, currentPrice);
         if ((highWaterMark - currentPrice) / highWaterMark >= 0.15) {
-          trader.sell('asset', pos.qty, currentPrice);
+          this._execSell(trader, 'asset', pos.qty, currentPrice, execModel);
           highWaterMark = 0;
           entryPrice = 0;
           equityCurve.push(trader.cash);
@@ -236,7 +274,7 @@ export class WalkForwardEvaluator {
         }
         if (entryPrice > 0 && (currentPrice - entryPrice) / entryPrice >= 0.25 && pos.qty > 1) {
           const halfQty = Math.floor(pos.qty / 2);
-          if (halfQty > 0) trader.sell('asset', halfQty, currentPrice);
+          if (halfQty > 0) this._execSell(trader, 'asset', halfQty, currentPrice, execModel);
         }
       }
 
@@ -247,14 +285,14 @@ export class WalkForwardEvaluator {
           confidence: signal.confidence,
         });
         if (sizing.qty > 0) {
-          trader.buy('asset', sizing.qty, currentPrice);
+          this._execBuy(trader, 'asset', sizing.qty, currentPrice, execModel);
           entryPrice = currentPrice;
           highWaterMark = currentPrice;
         }
       } else if (signal.action === 'SELL') {
         const currentPos = trader.getPosition('asset');
         if (currentPos) {
-          trader.sell('asset', currentPos.qty, currentPrice);
+          this._execSell(trader, 'asset', currentPos.qty, currentPrice, execModel);
           highWaterMark = 0;
           entryPrice = 0;
         }
@@ -265,9 +303,11 @@ export class WalkForwardEvaluator {
     }
 
     const remainingPos = trader.getPosition('asset');
-    if (remainingPos) trader.sell('asset', remainingPos.qty, candles[candles.length - 1].close);
+    if (remainingPos) this._execSell(trader, 'asset', remainingPos.qty, candles[candles.length - 1].close, execModel);
 
-    return this._computeResults('Rules-Ensemble', trader, equityCurve, initialBalance);
+    return this._computeResults('Rules-Ensemble', trader, equityCurve, initialBalance, {
+      executionCosts: execModel ? round(execModel.totalSlippagePaid + execModel.totalCommissionPaid) : 0,
+    });
   }
 
   // BB-Conservative baseline (the 0.64 Sharpe target)
@@ -288,6 +328,7 @@ export class WalkForwardEvaluator {
   _runSingleStrategy(name, strategy, candles, initialBalance) {
     const trader = new PaperTrader({ initialBalance, maxPositionPct: 0.25 });
     const sizer = new PositionSizer({ maxPositionPct: 0.25, kellyFraction: 0.33 });
+    const execModel = this._makeExecModel();
     const equityCurve = [initialBalance];
     const lookback = 60;
     let highWaterMark = 0;
@@ -304,7 +345,7 @@ export class WalkForwardEvaluator {
       if (pos) {
         highWaterMark = Math.max(highWaterMark, currentPrice);
         if ((highWaterMark - currentPrice) / highWaterMark >= 0.15) {
-          trader.sell('asset', pos.qty, currentPrice);
+          this._execSell(trader, 'asset', pos.qty, currentPrice, execModel);
           highWaterMark = 0;
           entryPrice = 0;
           equityCurve.push(trader.cash);
@@ -312,7 +353,7 @@ export class WalkForwardEvaluator {
         }
         if (entryPrice > 0 && (currentPrice - entryPrice) / entryPrice >= 0.25 && pos.qty > 1) {
           const halfQty = Math.floor(pos.qty / 2);
-          if (halfQty > 0) trader.sell('asset', halfQty, currentPrice);
+          if (halfQty > 0) this._execSell(trader, 'asset', halfQty, currentPrice, execModel);
         }
       }
 
@@ -323,14 +364,14 @@ export class WalkForwardEvaluator {
           confidence: signal.confidence,
         });
         if (sizing.qty > 0) {
-          trader.buy('asset', sizing.qty, currentPrice);
+          this._execBuy(trader, 'asset', sizing.qty, currentPrice, execModel);
           entryPrice = currentPrice;
           highWaterMark = currentPrice;
         }
       } else if (signal.action === 'SELL') {
         const currentPos = trader.getPosition('asset');
         if (currentPos) {
-          trader.sell('asset', currentPos.qty, currentPrice);
+          this._execSell(trader, 'asset', currentPos.qty, currentPrice, execModel);
           highWaterMark = 0;
           entryPrice = 0;
         }
@@ -341,9 +382,11 @@ export class WalkForwardEvaluator {
     }
 
     const remainingPos = trader.getPosition('asset');
-    if (remainingPos) trader.sell('asset', remainingPos.qty, candles[candles.length - 1].close);
+    if (remainingPos) this._execSell(trader, 'asset', remainingPos.qty, candles[candles.length - 1].close, execModel);
 
-    return this._computeResults(name, trader, equityCurve, initialBalance);
+    return this._computeResults(name, trader, equityCurve, initialBalance, {
+      executionCosts: execModel ? round(execModel.totalSlippagePaid + execModel.totalCommissionPaid) : 0,
+    });
   }
 
   _trainModel(candles) {
@@ -390,6 +433,8 @@ export class WalkForwardEvaluator {
       name,
       totalReturn: round((totalPnl / initialBalance) * 100),
       sharpeRatio: round(computeSharpeRatio(equityCurve)),
+      sortinoRatio: round(computeSortinoRatio(equityCurve)),
+      calmarRatio: round(computeCalmarRatio(equityCurve)),
       maxDrawdown: round(computeMaxDrawdown(equityCurve) * 100),
       totalTrades: sellTrades.length,
       winRate: round(sellTrades.length > 0 ? (wins.length / sellTrades.length) * 100 : 0),

@@ -131,12 +131,39 @@ describe('WalkForwardEvaluator', () => {
       const wf = new WalkForwardEvaluator({ epochs: 5, minTrainSamples: 50 });
       const result = wf.evaluate(candles);
 
-      const fields = ['name', 'totalReturn', 'sharpeRatio', 'maxDrawdown',
-        'totalTrades', 'winRate', 'profitFactor', 'finalEquity'];
+      const fields = ['name', 'totalReturn', 'sharpeRatio', 'sortinoRatio', 'calmarRatio',
+        'maxDrawdown', 'totalTrades', 'winRate', 'profitFactor', 'finalEquity'];
       for (const key of ['mlEnsemble', 'bbConservative', 'momentum7d']) {
         for (const field of fields) {
           expect(result[key]).toHaveProperty(field);
         }
+      }
+    });
+
+    it('includes execution costs when configured', () => {
+      const candles = makeCandles(400);
+      const wf = new WalkForwardEvaluator({
+        epochs: 5, minTrainSamples: 50,
+        slippageBps: 5, commissionBps: 10,
+      });
+      const result = wf.evaluate(candles);
+
+      for (const key of ['mlEnsemble', 'bbConservative', 'momentum7d']) {
+        expect(typeof result[key].executionCosts).toBe('number');
+        expect(result[key].executionCosts).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it('zero execution costs when set to 0', () => {
+      const candles = makeCandles(400);
+      const wf = new WalkForwardEvaluator({
+        epochs: 5, minTrainSamples: 50,
+        slippageBps: 0, commissionBps: 0,
+      });
+      const result = wf.evaluate(candles);
+
+      for (const key of ['mlEnsemble', 'bbConservative', 'momentum7d']) {
+        expect(result[key].executionCosts).toBe(0);
       }
     });
   });
