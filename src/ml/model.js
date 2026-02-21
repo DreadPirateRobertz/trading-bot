@@ -6,9 +6,16 @@ import { NUM_FEATURES, NUM_CLASSES } from './features.js';
 
 export class NeuralNetwork {
   // layers: array of layer sizes, e.g. [10, 16, 8, 3]
-  constructor({ layers = [NUM_FEATURES, 16, 8, NUM_CLASSES], learningRate = 0.01 } = {}) {
+  constructor({
+    layers = [NUM_FEATURES, 16, 8, NUM_CLASSES],
+    learningRate = 0.01,
+    weightDecay = 0,       // L2 regularization strength (e.g. 1e-4)
+    gradientClip = 0,      // max gradient norm (e.g. 5.0), 0 = disabled
+  } = {}) {
     this.layers = layers;
     this.learningRate = learningRate;
+    this.weightDecay = weightDecay;
+    this.gradientClip = gradientClip;
     this.weights = [];
     this.biases = [];
     this.trained = false;
@@ -77,12 +84,24 @@ export class NeuralNetwork {
   }
 
   // Train on a single sample using backpropagation
+  // Supports L2 regularization (weight decay) and gradient clipping
   trainSample(input, target) {
     const activations = this.forward(input);
     const output = activations[activations.length - 1];
 
     // Output layer error (cross-entropy derivative with softmax = output - target)
     let deltas = output.map((o, i) => o - target[i]);
+
+    // Gradient clipping: limit delta magnitudes to prevent exploding gradients
+    if (this.gradientClip > 0) {
+      let normSq = 0;
+      for (let i = 0; i < deltas.length; i++) normSq += deltas[i] ** 2;
+      const norm = Math.sqrt(normSq);
+      if (norm > this.gradientClip) {
+        const scale = this.gradientClip / norm;
+        deltas = deltas.map(d => d * scale);
+      }
+    }
 
     // Backpropagate
     for (let l = this.weights.length - 1; l >= 0; l--) {
@@ -98,8 +117,10 @@ export class NeuralNetwork {
           if (nextDeltas) {
             nextDeltas[k] += this.weights[l][j][k] * deltas[j];
           }
-          // Update weight
-          this.weights[l][j][k] -= this.learningRate * deltas[j] * prevActivation[k];
+          // Update weight with L2 regularization (weight decay)
+          const grad = deltas[j] * prevActivation[k];
+          const l2Penalty = this.weightDecay * this.weights[l][j][k];
+          this.weights[l][j][k] -= this.learningRate * (grad + l2Penalty);
         }
       }
 
@@ -109,14 +130,32 @@ export class NeuralNetwork {
           const a = activations[l][k];
           return d * a * (1 - a); // sigmoid derivative
         });
+
+        // Clip hidden layer gradients too
+        if (this.gradientClip > 0) {
+          let normSq = 0;
+          for (let i = 0; i < deltas.length; i++) normSq += deltas[i] ** 2;
+          const norm = Math.sqrt(normSq);
+          if (norm > this.gradientClip) {
+            const scale = this.gradientClip / norm;
+            deltas = deltas.map(d => d * scale);
+          }
+        }
       }
     }
 
-    // Cross-entropy loss
+    // Cross-entropy loss + L2 penalty
     let loss = 0;
     for (let i = 0; i < target.length; i++) {
       if (target[i] > 0) {
         loss -= target[i] * Math.log(Math.max(output[i], 1e-15));
+      }
+    }
+    if (this.weightDecay > 0) {
+      for (const layer of this.weights) {
+        for (const row of layer) {
+          for (const w of row) loss += 0.5 * this.weightDecay * w * w;
+        }
       }
     }
     return loss;
@@ -244,6 +283,8 @@ export class NeuralNetwork {
     return {
       layers: this.layers,
       learningRate: this.learningRate,
+      weightDecay: this.weightDecay,
+      gradientClip: this.gradientClip,
       weights: this.weights,
       biases: this.biases,
       trained: this.trained,
@@ -252,7 +293,12 @@ export class NeuralNetwork {
 
   // Deserialize model from JSON
   static fromJSON(json) {
-    const nn = new NeuralNetwork({ layers: json.layers, learningRate: json.learningRate });
+    const nn = new NeuralNetwork({
+      layers: json.layers,
+      learningRate: json.learningRate,
+      weightDecay: json.weightDecay || 0,
+      gradientClip: json.gradientClip || 0,
+    });
     nn.weights = json.weights;
     nn.biases = json.biases;
     nn.trained = json.trained;

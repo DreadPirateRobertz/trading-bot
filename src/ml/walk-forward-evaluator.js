@@ -202,8 +202,9 @@ export class WalkForwardEvaluator {
         }
       }
 
-      // Execute signal
-      if (signal.action === 'BUY' && signal.confidence > 0.05 && !trader.getPosition('asset')) {
+      // Execute signal — raised confidence gate from 0.05 to 0.25
+      // to filter noisy predictions on real data
+      if (signal.action === 'BUY' && signal.confidence > 0.25 && !trader.getPosition('asset')) {
         const sizing = sizer.calculate({
           portfolioValue: trader.portfolioValue,
           price: currentPrice,
@@ -396,14 +397,18 @@ export class WalkForwardEvaluator {
       horizon: cfg.horizon,
       buyThreshold: cfg.buyThreshold,
       sellThreshold: cfg.sellThreshold,
+      adaptiveThresholds: true,  // vol-scaled labeling for real data
+      thresholdMultiplier: 0.8,
     });
 
     if (data.length < 20) return null;
 
-    // Train with learning rate decay: start high, decay to retain generalization
+    // Train with learning rate decay + L2 regularization + gradient clipping
     const model = new NeuralNetwork({
       layers: cfg.layers,
       learningRate: cfg.learningRate,
+      weightDecay: 1e-4,    // L2 regularization to prevent overfitting on noisy data
+      gradientClip: 5.0,    // prevent exploding gradients from fat-tailed returns
     });
 
     // Phase 1: aggressive learning
@@ -494,10 +499,12 @@ export function runMultiSessionEvaluation({
   };
 }
 
-// Synthetic data generator (regime-aware GBM)
+// Synthetic data generator (regime-aware with fat tails + vol clustering)
+// Generates more realistic crypto-like price paths compared to plain GBM
 function generateRegimeData(startPrice, totalCandles) {
   const candles = [];
   let price = startPrice;
+  let currentVol = 0.02; // GARCH-like conditional volatility
   const regimes = [
     { name: 'bull_trend', drift: 0.003, vol: 0.015, duration: 0.25 },
     { name: 'high_vol', drift: -0.001, vol: 0.04, duration: 0.2 },
@@ -509,18 +516,39 @@ function generateRegimeData(startPrice, totalCandles) {
   for (const regime of regimes) {
     const n = Math.round(totalCandles * regime.duration);
     for (let j = 0; j < n; j++) {
-      const z = boxMuller();
-      const ret = regime.drift + regime.vol * z;
+      // Fat-tailed returns via Student's t-distribution (df=5)
+      const z = studentT(5);
+
+      // GARCH(1,1)-like volatility clustering
+      // vol_t = sqrt(omega + alpha * ret^2 + beta * vol_{t-1}^2)
+      const omega = regime.vol * regime.vol * 0.05;  // long-run variance contribution
+      const alpha = 0.15;  // shock impact
+      const beta = 0.80;   // persistence
+      const lastRet = candles.length > 0
+        ? (price - candles[candles.length - 1].close) / candles[candles.length - 1].close
+        : 0;
+      currentVol = Math.sqrt(omega + alpha * lastRet * lastRet + beta * currentVol * currentVol);
+      // Clamp vol to prevent explosion/collapse
+      currentVol = Math.max(regime.vol * 0.3, Math.min(currentVol, regime.vol * 3));
+
+      const ret = regime.drift + currentVol * z;
+
+      // Sudden regime jump: 2% chance of gap move (mimics real crypto)
+      const gap = Math.random() < 0.02 ? (Math.random() - 0.5) * regime.vol * 6 : 0;
+
       const open = price;
-      price = price * Math.exp(ret);
-      const range = price * regime.vol * (0.5 + Math.random());
+      price = price * Math.exp(ret + gap);
+      price = Math.max(price, 0.01);
+
+      // Intrabar range proportional to vol (with noise)
+      const range = price * currentVol * (0.5 + Math.random() * 1.5);
       candles.push({
         openTime: Date.now() - (totalCandles - candles.length) * 86400000,
         open: round(open),
         high: round(Math.max(open, price) + range * Math.random()),
         low: round(Math.max(Math.min(open, price) - range * Math.random(), 0.01)),
         close: round(price),
-        volume: Math.round(1000000 * (0.5 + 2 * Math.random())),
+        volume: Math.round(1000000 * (0.5 + 2 * Math.random()) * (1 + currentVol / regime.vol)),
         regime: regime.name,
       });
     }
@@ -528,10 +556,24 @@ function generateRegimeData(startPrice, totalCandles) {
   return candles;
 }
 
+// Standard normal via Box-Muller
 function boxMuller() {
   const u1 = Math.random();
   const u2 = Math.random();
   return Math.sqrt(-2 * Math.log(u1 || 0.001)) * Math.cos(2 * Math.PI * u2);
+}
+
+// Student's t-distribution sample via ratio of normal/chi-squared
+// df degrees of freedom — lower df = fatter tails (df=5 for crypto)
+function studentT(df) {
+  const z = boxMuller();
+  // Sum of squared normals for chi-squared approx
+  let chiSq = 0;
+  for (let i = 0; i < df; i++) {
+    const u = boxMuller();
+    chiSq += u * u;
+  }
+  return z / Math.sqrt(chiSq / df);
 }
 
 function round(n) { return Math.round(n * 100) / 100; }

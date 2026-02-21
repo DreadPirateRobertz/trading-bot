@@ -1,10 +1,12 @@
 // ML Feature Extraction
 // Transforms raw OHLCV candles + indicators into normalized feature vectors for model input
+// Uses adaptive z-score normalization to handle real market data distributions
 
 import { computeRSI, computeMACD, computeBollingerBands, detectVolumeSpike } from '../signals/index.js';
 
 // Extract a single feature vector from a window of candles + optional sentiment
 // Returns array of normalized features suitable for neural network input
+// Uses rolling volatility for adaptive normalization (works on both synthetic and real data)
 export function extractFeatures(candles, { sentiment = null, rsiPeriod = 14 } = {}) {
   if (candles.length < 26) return null; // Need enough data for MACD slow period
 
@@ -12,10 +14,20 @@ export function extractFeatures(candles, { sentiment = null, rsiPeriod = 14 } = 
   const volumes = candles.map(c => c.volume);
   const currentPrice = closes[closes.length - 1];
 
+  // Compute rolling return volatility for adaptive normalization
+  const returns = [];
+  for (let i = 1; i < closes.length; i++) {
+    returns.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+  }
+  const retStd = arrStd(returns.slice(-20)) || 0.02; // 20-bar rolling vol, 2% fallback
+
   // Technical indicators
   const rsi = computeRSI(closes, rsiPeriod);
   const macd = computeMACD(closes);
   const bollinger = computeBollingerBands(closes);
+
+  // ATR proxy from candle high-low ranges (for MACD normalization)
+  const atr = computeATR(candles.slice(-15));
 
   // Volume ratio: current / 20-period average
   const volWindow = volumes.slice(-20);
@@ -27,6 +39,12 @@ export function extractFeatures(candles, { sentiment = null, rsiPeriod = 14 } = 
   const ret5 = closes.length >= 6 ? (currentPrice - closes[closes.length - 6]) / closes[closes.length - 6] : 0;
   const ret10 = closes.length >= 11 ? (currentPrice - closes[closes.length - 11]) / closes[closes.length - 11] : 0;
 
+  // Z-score normalize returns by rolling volatility
+  // Adapts to actual data distribution — handles both 1.5% synthetic vol and 5% real BTC vol
+  const normRet1 = ret1 / retStd;
+  const normRet5 = ret5 / (retStd * Math.sqrt(5));
+  const normRet10 = ret10 / (retStd * Math.sqrt(10));
+
   // Bollinger position: where price sits in the band [0=lower, 1=upper]
   let bollingerPos = 0.5;
   let bollingerBw = 0;
@@ -35,6 +53,11 @@ export function extractFeatures(candles, { sentiment = null, rsiPeriod = 14 } = 
     bollingerPos = range > 0 ? (currentPrice - bollinger.lower) / range : 0.5;
     bollingerBw = bollinger.bandwidth || 0;
   }
+  // Normalize BB bandwidth by rolling vol (adaptive instead of fixed 0.2 cap)
+  const bbNorm = bollingerBw / (retStd * 4 + 0.01);
+
+  // MACD histogram normalized by ATR (scales with actual price volatility)
+  const macdNorm = macd ? macd.histogram / (atr || currentPrice * 0.02) : 0;
 
   // Normalize sentiment to [-1, 1]
   let sentimentScore = 0;
@@ -48,26 +71,29 @@ export function extractFeatures(candles, { sentiment = null, rsiPeriod = 14 } = 
   }
 
   return [
-    rsi !== null ? rsi / 100 : 0.5,                          // RSI [0, 1]
-    macd ? clamp(macd.histogram / (Math.abs(currentPrice) * 0.01 + 1), -1, 1) * 0.5 + 0.5 : 0.5, // MACD histogram [0, 1]
-    macd ? (macd.macd > macd.signal ? 1 : 0) : 0.5,         // MACD bullish signal {0, 1}
-    clamp(bollingerPos, 0, 1),                                // Bollinger position [0, 1]
-    clamp(bollingerBw, 0, 0.2) / 0.2,                        // Bollinger bandwidth [0, 1]
-    clamp(volumeRatio / 3, 0, 1),                             // Volume ratio [0, 1]
-    clamp(ret1 * 10, -1, 1) * 0.5 + 0.5,                     // 1-period return [0, 1]
-    clamp(ret5 * 5, -1, 1) * 0.5 + 0.5,                      // 5-period return [0, 1]
-    clamp(ret10 * 3, -1, 1) * 0.5 + 0.5,                     // 10-period return [0, 1]
-    sentimentScore * 0.5 + 0.5,                               // Sentiment [0, 1]
+    rsi !== null ? rsi / 100 : 0.5,                                // RSI [0, 1]
+    clamp(macdNorm, -2, 2) * 0.25 + 0.5,                           // MACD histogram (ATR-normed) [0, 1]
+    macd ? (macd.macd > macd.signal ? 1 : 0) : 0.5,               // MACD crossover {0, 1}
+    clamp(bollingerPos, 0, 1),                                      // Bollinger position [0, 1]
+    clamp(bbNorm, 0, 3) / 3,                                        // Bollinger bandwidth (vol-normed) [0, 1]
+    clamp(volumeRatio / 3, 0, 1),                                   // Volume ratio [0, 1]
+    clamp(normRet1, -3, 3) / 6 + 0.5,                               // 1-period return z-score [0, 1]
+    clamp(normRet5, -3, 3) / 6 + 0.5,                               // 5-period return z-score [0, 1]
+    clamp(normRet10, -3, 3) / 6 + 0.5,                              // 10-period return z-score [0, 1]
+    sentimentScore * 0.5 + 0.5,                                      // Sentiment [0, 1]
   ];
 }
 
 // Generate labeled training data from candle history
 // Label based on future returns: BUY if up > threshold, SELL if down > threshold, else HOLD
+// When adaptiveThresholds=true, thresholds scale with rolling volatility (critical for real data)
 export function generateTrainingData(candles, {
   lookback = 30,
   horizon = 5,
   buyThreshold = 0.02,
   sellThreshold = -0.02,
+  adaptiveThresholds = true,  // use vol-scaled thresholds (recommended for real data)
+  thresholdMultiplier = 0.8,  // threshold = multiplier * expectedMove
   sentiment = [],
 } = {}) {
   const samples = [];
@@ -80,11 +106,25 @@ export function generateTrainingData(candles, {
     const futurePrice = candles[i + horizon].close;
     const futureReturn = (futurePrice - currentPrice) / currentPrice;
 
+    // Compute adaptive thresholds based on recent volatility
+    let effectiveBuyThreshold = buyThreshold;
+    let effectiveSellThreshold = sellThreshold;
+    if (adaptiveThresholds && i >= 21) {
+      const recentReturns = [];
+      for (let j = Math.max(1, i - 20); j <= i; j++) {
+        recentReturns.push((candles[j].close - candles[j - 1].close) / candles[j - 1].close);
+      }
+      const dailyVol = arrStd(recentReturns) || 0.02;
+      const expectedMove = dailyVol * Math.sqrt(horizon);
+      effectiveBuyThreshold = Math.max(expectedMove * thresholdMultiplier, 0.005);
+      effectiveSellThreshold = -effectiveBuyThreshold;
+    }
+
     // Label: [buy, hold, sell] one-hot
     let label;
-    if (futureReturn > buyThreshold) {
+    if (futureReturn > effectiveBuyThreshold) {
       label = [1, 0, 0]; // BUY
-    } else if (futureReturn < sellThreshold) {
+    } else if (futureReturn < effectiveSellThreshold) {
       label = [0, 0, 1]; // SELL
     } else {
       label = [0, 1, 0]; // HOLD
@@ -209,9 +249,35 @@ export const NUM_PIPELINE_FEATURES = 13;
 export const NUM_CLASSES = 3; // BUY, HOLD, SELL
 export const CLASS_NAMES = ['BUY', 'HOLD', 'SELL'];
 
+// Standard deviation of an array
+function arrStd(arr) {
+  if (arr.length < 2) return 0;
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  const variance = arr.reduce((s, v) => s + (v - mean) ** 2, 0) / (arr.length - 1);
+  return Math.sqrt(variance);
+}
+
+// Average True Range from OHLCV candles
+function computeATR(candles) {
+  if (candles.length < 2) return 0;
+  let sum = 0;
+  for (let i = 1; i < candles.length; i++) {
+    const tr = Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close)
+    );
+    sum += tr;
+  }
+  return sum / (candles.length - 1);
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
+
+// Exported for use in walk-forward evaluator adaptive thresholds
+export { arrStd, computeATR };
 
 function findClosestSentiment(sentiments, timestamp) {
   if (!timestamp || sentiments.length === 0) return null;

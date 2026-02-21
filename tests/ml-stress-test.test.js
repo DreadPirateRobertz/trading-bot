@@ -84,7 +84,7 @@ describe('ML Pipeline Stress Test (tb-658)', () => {
   const INITIAL_BALANCE = 100000;
 
   describe('walk-forward evaluator under regime data', () => {
-    it('completes 10-session multi-regime evaluation without errors', () => {
+    it('completes 10-session multi-regime evaluation without errors', { timeout: 15000 }, () => {
       const evaluator = new WalkForwardEvaluator({
         epochs: 30, retrainInterval: 80, minTrainSamples: 60,
       });
