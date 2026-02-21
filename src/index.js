@@ -17,3 +17,6 @@ export { createDashboard } from './dashboard/index.js';
 
 // Phase 4: Historical OHLCV data pipeline + feature engineering
 export { CandleStore, HistoricalFetcher, DataPipeline, computeAllFeatures } from './data-pipeline/index.js';
+
+// Phase 4: ML intelligence layer
+export { NeuralNetwork, Trainer, MLSignalEnhancer, extractFeatures, generateTrainingData, FEATURE_NAMES, NUM_FEATURES, NUM_CLASSES, CLASS_NAMES } from './ml/index.js';
