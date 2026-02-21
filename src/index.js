@@ -17,3 +17,6 @@ export { createDashboard } from './dashboard/index.js';
 
 // Phase 4: Historical OHLCV data pipeline + feature engineering
 export { CandleStore, HistoricalFetcher, DataPipeline, computeAllFeatures } from './data-pipeline/index.js';
+
+// Phase 5: MCP server for AI-driven trade management
+export { createMcpServer, startMcpServer, TradingBotState } from './mcp/index.js';
