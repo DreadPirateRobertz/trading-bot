@@ -397,4 +397,241 @@ export function monteCarloPermutation(equityCurve, { iterations = 1000 } = {}) {
   };
 }
 
+// ─── Pairs Backtester ────────────────────────────────────────────────────────
+// Backtests statistical arbitrage pairs trading strategies on two parallel
+// price series. Handles two-legged positions (long A / short B and vice versa),
+// hedged notional allocation, and spread-based P&L tracking.
+
+import { PairsTradingStrategy } from '../strategies/pairs-trading.js';
+
+export class PairsBacktester {
+  constructor({
+    initialBalance = 100000,
+    maxPositionPct = 0.10,
+    strategy = null,
+    strategyConfig = {},
+    executionModel = null,
+  } = {}) {
+    this.initialBalance = initialBalance;
+    this.maxPositionPct = maxPositionPct;
+    this.strategy = strategy || new PairsTradingStrategy(strategyConfig);
+    this.executionModel = executionModel;
+  }
+
+  // Run pairs backtest on two parallel close price arrays
+  // closesA, closesB: arrays of closing prices for the two assets
+  // Returns standard metrics plus spread-specific stats
+  run(closesA, closesB, { lookback = 60, symbolA = 'A', symbolB = 'B' } = {}) {
+    const n = Math.min(closesA.length, closesB.length);
+    if (n < lookback) {
+      return { error: `Need at least ${lookback} data points, got ${n}` };
+    }
+
+    if (this.executionModel) this.executionModel.reset();
+
+    let cash = this.initialBalance;
+    let position = null; // { direction, legA, legB, entryBar, hedgeRatio }
+    const trades = [];
+    const equityCurve = [this.initialBalance];
+    const spreadSignals = [];
+
+    for (let i = lookback; i < n; i++) {
+      const windowA = closesA.slice(i - lookback, i + 1);
+      const windowB = closesB.slice(i - lookback, i + 1);
+      const priceA = closesA[i];
+      const priceB = closesB[i];
+
+      const sig = this.strategy.generateSignal(windowA, windowB);
+      spreadSignals.push({ index: i, signal: sig.signal, action: sig.action, zScore: sig.zScore, confidence: sig.confidence });
+
+      // Position management
+      if (position) {
+        // Check for exit: signal flipped or returned to mean (signal=0)
+        const shouldExit = sig.signal === 0 || sig.signal === -position.direction;
+
+        if (shouldExit) {
+          const pnl = this._closePosition(position, priceA, priceB, i);
+          cash += pnl;
+          trades.push({
+            direction: position.direction,
+            entryBar: position.entryBar,
+            exitBar: i,
+            durationBars: i - position.entryBar,
+            hedgeRatio: position.hedgeRatio,
+            pnl: round4(pnl),
+            pnlPct: round4(pnl / this.initialBalance * 100),
+            exitReason: sig.signal === 0 ? 'mean_reversion' : 'signal_flip',
+          });
+          position = null;
+
+          // If signal flipped, immediately enter the opposite direction
+          if (sig.signal !== 0 && sig.confidence > 0.1) {
+            position = this._openPosition(sig, priceA, priceB, cash, i);
+          }
+        }
+      } else {
+        // No position — check for entry
+        if (sig.signal !== 0 && sig.confidence > 0.1 && sig.hedgeRatio) {
+          position = this._openPosition(sig, priceA, priceB, cash, i);
+        }
+      }
+
+      // Mark-to-market equity
+      let unrealizedPnl = 0;
+      if (position) {
+        unrealizedPnl = this._markToMarket(position, priceA, priceB);
+      }
+      equityCurve.push(cash + unrealizedPnl);
+    }
+
+    // Close remaining position at final prices
+    if (position) {
+      const finalA = closesA[n - 1];
+      const finalB = closesB[n - 1];
+      const pnl = this._closePosition(position, finalA, finalB, n - 1);
+      cash += pnl;
+      trades.push({
+        direction: position.direction,
+        entryBar: position.entryBar,
+        exitBar: n - 1,
+        durationBars: n - 1 - position.entryBar,
+        hedgeRatio: position.hedgeRatio,
+        pnl: round4(pnl),
+        pnlPct: round4(pnl / this.initialBalance * 100),
+        exitReason: 'end_of_data',
+      });
+      position = null;
+    }
+
+    return this._computeMetrics(cash, trades, equityCurve, spreadSignals, {
+      symbolA, symbolB, dataPoints: n,
+    });
+  }
+
+  // Open a new spread position
+  _openPosition(sig, priceA, priceB, cash, bar) {
+    const direction = sig.signal; // 1 = long spread, -1 = short spread
+    const hedgeRatio = Math.abs(sig.hedgeRatio);
+    const notional = cash * this.maxPositionPct;
+
+    // Allocate notional across both legs: qtyA * priceA + qtyB * priceB = notional
+    const qtyA = notional / (priceA + hedgeRatio * priceB);
+    const qtyB = qtyA * hedgeRatio;
+
+    let entryPriceA = priceA;
+    let entryPriceB = priceB;
+
+    if (this.executionModel) {
+      // Long spread: buy A (pay more), sell B (receive less)
+      // Short spread: sell A (receive less), buy B (pay more)
+      const sideA = direction > 0 ? 'buy' : 'sell';
+      const sideB = direction > 0 ? 'sell' : 'buy';
+      entryPriceA = this.executionModel.getExecutionPrice(sideA, priceA, { qty: qtyA });
+      entryPriceB = this.executionModel.getExecutionPrice(sideB, priceB, { qty: qtyB });
+      this.executionModel.getCommission(entryPriceA, qtyA);
+      this.executionModel.getCommission(entryPriceB, qtyB);
+    }
+
+    return {
+      direction,
+      legA: { qty: qtyA, entryPrice: entryPriceA },
+      legB: { qty: qtyB, entryPrice: entryPriceB },
+      entryBar: bar,
+      hedgeRatio,
+    };
+  }
+
+  // Close a spread position and return realized P&L
+  _closePosition(position, priceA, priceB, bar) {
+    let exitPriceA = priceA;
+    let exitPriceB = priceB;
+
+    if (this.executionModel) {
+      const sideA = position.direction > 0 ? 'sell' : 'buy';
+      const sideB = position.direction > 0 ? 'buy' : 'sell';
+      exitPriceA = this.executionModel.getExecutionPrice(sideA, priceA, { qty: position.legA.qty });
+      exitPriceB = this.executionModel.getExecutionPrice(sideB, priceB, { qty: position.legB.qty });
+      this.executionModel.getCommission(exitPriceA, position.legA.qty);
+      this.executionModel.getCommission(exitPriceB, position.legB.qty);
+    }
+
+    // Long spread: profit when A rises and B falls
+    // Short spread: profit when A falls and B rises
+    const pnlA = (exitPriceA - position.legA.entryPrice) * position.legA.qty * position.direction;
+    const pnlB = (position.legB.entryPrice - exitPriceB) * position.legB.qty * position.direction;
+
+    return pnlA + pnlB;
+  }
+
+  // Mark-to-market unrealized P&L
+  _markToMarket(position, priceA, priceB) {
+    const pnlA = (priceA - position.legA.entryPrice) * position.legA.qty * position.direction;
+    const pnlB = (position.legB.entryPrice - priceB) * position.legB.qty * position.direction;
+    return pnlA + pnlB;
+  }
+
+  _computeMetrics(finalCash, trades, equityCurve, signals, info) {
+    const totalPnl = finalCash - this.initialBalance;
+    const totalReturn = (totalPnl / this.initialBalance) * 100;
+    const maxDrawdown = computeMaxDrawdown(equityCurve);
+    const sharpe = computeSharpeRatio(equityCurve);
+    const sortino = computeSortinoRatio(equityCurve);
+    const calmar = computeCalmarRatio(equityCurve);
+
+    const wins = trades.filter(t => t.pnl > 0);
+    const losses = trades.filter(t => t.pnl <= 0);
+    const winRate = trades.length > 0 ? wins.length / trades.length : 0;
+    const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+    const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 0;
+
+    const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
+    const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
+
+    const avgDuration = trades.length > 0
+      ? trades.reduce((s, t) => s + t.durationBars, 0) / trades.length
+      : 0;
+
+    // Exit reason breakdown
+    const exitReasons = {};
+    for (const t of trades) {
+      exitReasons[t.exitReason] = (exitReasons[t.exitReason] || 0) + 1;
+    }
+
+    const executionCosts = this.executionModel ? {
+      totalSlippage: round4(this.executionModel.totalSlippagePaid),
+      totalCommission: round4(this.executionModel.totalCommissionPaid),
+      totalCosts: round4(this.executionModel.totalSlippagePaid + this.executionModel.totalCommissionPaid),
+    } : null;
+
+    return {
+      symbolA: info.symbolA,
+      symbolB: info.symbolB,
+      dataPoints: info.dataPoints,
+      initialBalance: this.initialBalance,
+      finalBalance: round4(finalCash),
+      totalPnl: round4(totalPnl),
+      totalReturn: round4(totalReturn),
+      totalTrades: trades.length,
+      wins: wins.length,
+      losses: losses.length,
+      winRate: round4(winRate * 100),
+      avgWin: round4(avgWin),
+      avgLoss: round4(avgLoss),
+      profitFactor: round4(profitFactor),
+      maxDrawdown: round4(maxDrawdown * 100),
+      sharpeRatio: round4(sharpe),
+      sortinoRatio: round4(sortino),
+      calmarRatio: round4(calmar),
+      avgDurationBars: round4(avgDuration),
+      exitReasons,
+      executionCosts,
+      equityCurve,
+      trades,
+    };
+  }
+}
+
+function round4(n) { return Math.round(n * 10000) / 10000; }
+
 export { computeMaxDrawdown, computeSharpeRatio, computeSortinoRatio, computeCalmarRatio };

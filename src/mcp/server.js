@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { SignalEngine } from '../signals/engine.js';
 import { PositionSizer } from '../signals/position-sizer.js';
 import { GaussianHMM } from '../ml/hmm.js';
-import { Backtester } from '../backtest/index.js';
+import { Backtester, PairsBacktester } from '../backtest/index.js';
 import { EnsembleStrategy } from '../strategies/ensemble.js';
 
 // Default candle format for examples and validation
@@ -371,6 +371,67 @@ export function createServer(options = {}) {
             totalOriginalAllocation: Math.round(totalOriginal * 10000) / 10000,
             totalAdjustedAllocation: Math.round(totalAdjusted * 10000) / 10000,
             diversificationBenefit: Math.round((1 - totalAdjusted / totalOriginal) * 10000) / 100,
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ─── Tool: run_pairs_backtest ─────────────────────────────────────────
+  server.tool(
+    'run_pairs_backtest',
+    'Run a pairs trading backtest on two cointegrated assets. Tests spread mean-reversion ' +
+    'with z-score entry/exit, ADF stationarity checks, and two-legged position tracking.',
+    {
+      closesA: z.array(z.number()).min(60).describe('Closing prices for asset A (minimum 60)'),
+      closesB: z.array(z.number()).min(60).describe('Closing prices for asset B (minimum 60)'),
+      symbolA: z.string().optional().describe('Symbol name for asset A'),
+      symbolB: z.string().optional().describe('Symbol name for asset B'),
+      initialBalance: z.number().positive().optional().describe('Starting balance (default 100000)'),
+      maxPositionPct: z.number().min(0.01).max(0.50).optional().describe('Max position size as portfolio fraction'),
+      entryZScore: z.number().positive().optional().describe('Z-score entry threshold (default 2.0)'),
+      exitZScore: z.number().positive().optional().describe('Z-score exit threshold (default 0.5)'),
+      lookback: z.number().int().positive().optional().describe('Lookback period for signals (default 60)'),
+    },
+    async ({ closesA, closesB, symbolA = 'A', symbolB = 'B', initialBalance = 100000,
+             maxPositionPct = 0.10, entryZScore, exitZScore, lookback = 60 }) => {
+      const strategyConfig = {};
+      if (entryZScore) strategyConfig.entryZScore = entryZScore;
+      if (exitZScore) strategyConfig.exitZScore = exitZScore;
+
+      const bt = new PairsBacktester({
+        initialBalance,
+        maxPositionPct,
+        strategyConfig,
+      });
+
+      const result = bt.run(closesA, closesB, { symbolA, symbolB, lookback });
+
+      if (result.error) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: result.error }) }] };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            symbolA: result.symbolA,
+            symbolB: result.symbolB,
+            dataPoints: result.dataPoints,
+            initialBalance: result.initialBalance,
+            finalBalance: result.finalBalance,
+            totalPnl: result.totalPnl,
+            totalReturn: result.totalReturn,
+            totalTrades: result.totalTrades,
+            wins: result.wins,
+            losses: result.losses,
+            winRate: result.winRate,
+            profitFactor: result.profitFactor,
+            maxDrawdown: result.maxDrawdown,
+            sharpeRatio: result.sharpeRatio,
+            sortinoRatio: result.sortinoRatio,
+            avgDurationBars: result.avgDurationBars,
+            exitReasons: result.exitReasons,
           }, null, 2),
         }],
       };

@@ -73,7 +73,8 @@ describe('MCP Server', () => {
       expect(names).toContain('get_ensemble_signal');
       expect(names).toContain('compute_risk_parity');
       expect(names).toContain('compute_portfolio_kelly');
-      expect(names.length).toBe(8);
+      expect(names).toContain('run_pairs_backtest');
+      expect(names.length).toBe(9);
     });
 
     it('each tool has a description', async () => {
@@ -422,6 +423,73 @@ describe('MCP Server', () => {
       });
       const data = JSON.parse(result.content[0].text);
       expect(data.adjustedPositions.SOL).toBe(0.15);
+    });
+  });
+
+  describe('run_pairs_backtest', () => {
+    // Generate cointegrated pair for testing
+    function makeCointegPair(n) {
+      const closesA = [];
+      const closesB = [];
+      let pA = 100;
+      let spread = 0;
+      for (let i = 0; i < n; i++) {
+        pA += 0.001 * pA + (Math.sin(i * 0.3) * 0.3);
+        spread = spread * 0.9 + (((i * 17 + 3) % 100 - 50) / 250);
+        closesB.push(Math.max((pA - spread) / 1.5, 1));
+        closesA.push(pA);
+      }
+      return { closesA, closesB };
+    }
+
+    it('runs pairs backtest and returns metrics', async () => {
+      const { client } = await createTestPair();
+      const { closesA, closesB } = makeCointegPair(150);
+      const result = await client.callTool({
+        name: 'run_pairs_backtest',
+        arguments: { closesA, closesB, symbolA: 'BTC', symbolB: 'ETH' },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.symbolA).toBe('BTC');
+      expect(data.symbolB).toBe('ETH');
+      expect(data.dataPoints).toBe(150);
+      expect(data.initialBalance).toBe(100000);
+      expect(typeof data.totalPnl).toBe('number');
+      expect(typeof data.sharpeRatio).toBe('number');
+      expect(typeof data.maxDrawdown).toBe('number');
+      expect(typeof data.totalTrades).toBe('number');
+    });
+
+    it('returns error for insufficient data', async () => {
+      const { client } = await createTestPair();
+      const result = await client.callTool({
+        name: 'run_pairs_backtest',
+        arguments: {
+          closesA: Array.from({ length: 60 }, (_, i) => 100 + i),
+          closesB: Array.from({ length: 60 }, (_, i) => 50 + i),
+          lookback: 100,
+        },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.error).toBeDefined();
+    });
+
+    it('accepts custom strategy parameters', async () => {
+      const { client } = await createTestPair();
+      const { closesA, closesB } = makeCointegPair(150);
+      const result = await client.callTool({
+        name: 'run_pairs_backtest',
+        arguments: {
+          closesA,
+          closesB,
+          entryZScore: 1.5,
+          exitZScore: 0.3,
+          initialBalance: 50000,
+        },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.initialBalance).toBe(50000);
+      expect(data.error).toBeUndefined();
     });
   });
 });
