@@ -6,7 +6,8 @@ import { AlpacaConnector } from '../market-data/alpaca.js';
 import { BinanceConnector } from '../market-data/binance.js';
 import { RedditCrawler } from '../sentiment/reddit.js';
 import { NewsCrawler } from '../sentiment/news.js';
-import { scoreSentiment, aggregateScores } from '../sentiment/scorer.js';
+import { TwitterCrawler } from '../sentiment/twitter.js';
+import { scoreSentiment, scoreTweet, aggregateScores } from '../sentiment/scorer.js';
 import { PortfolioRiskManager } from '../risk/portfolio-risk-manager.js';
 import { Notifier } from '../alerts/notifier.js';
 
@@ -42,6 +43,9 @@ export class LiveTrader {
       ? new RedditCrawler(config.reddit)
       : null;
     this.newsCrawler = new NewsCrawler();
+    this.twitterCrawler = config.twitter?.bearerToken
+      ? new TwitterCrawler({ bearerToken: config.twitter.bearerToken })
+      : null;
 
     // Portfolio risk manager
     this.riskManager = new PortfolioRiskManager(config.risk || {});
@@ -231,6 +235,20 @@ export class LiveTrader {
             }
           } catch {
             // Reddit auth may fail - continue without
+          }
+        }
+
+        // Twitter/X sentiment
+        if (this.twitterCrawler) {
+          try {
+            const ticker = symbol.replace('USDT', '');
+            const tweets = await this.twitterCrawler.searchRecent(`$${ticker}`, { maxResults: 100 });
+            for (const tweet of tweets) {
+              const sentiment = scoreSentiment(tweet.text);
+              scores.push(scoreTweet(tweet, sentiment));
+            }
+          } catch {
+            // Twitter API may fail (rate limits, auth) - continue without
           }
         }
 

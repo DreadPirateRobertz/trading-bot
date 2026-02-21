@@ -65,6 +65,11 @@ export function loadConfig(envPath) {
       userAgent: get('REDDIT_USER_AGENT', 'tradingbot/1.0'),
     },
 
+    // Twitter/X (for sentiment)
+    twitter: {
+      bearerToken: get('TWITTER_BEARER_TOKEN', ''),
+    },
+
     // Trading params
     trading: {
       symbols: get('TRADING_SYMBOLS', 'BTCUSDT,ETHUSDT').split(',').map(s => s.trim()),

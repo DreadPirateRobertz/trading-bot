@@ -6,6 +6,7 @@ function makeConfig(overrides = {}) {
     alpaca: { keyId: '', secretKey: '', paper: true },
     binance: { apiKey: '', secretKey: '', testnet: true },
     reddit: { clientId: '', clientSecret: '', userAgent: 'test' },
+    twitter: { bearerToken: '' },
     trading: {
       symbols: ['BTCUSDT', 'ETHUSDT'],
       initialBalance: 100000,
@@ -283,5 +284,85 @@ describe('LiveTrader', () => {
     const trader = new LiveTrader({ config });
     const ws = trader.connectAlpacaWS(MockWebSocket);
     expect(ws).toBeNull();
+  });
+
+  describe('Twitter/X sentiment integration', () => {
+    it('initializes TwitterCrawler when bearer token is provided', () => {
+      const config = makeConfig({ twitter: { bearerToken: 'test-token' } });
+      const trader = new LiveTrader({ config });
+      expect(trader.twitterCrawler).toBeDefined();
+      expect(trader.twitterCrawler.bearerToken).toBe('test-token');
+    });
+
+    it('does not initialize TwitterCrawler without bearer token', () => {
+      const config = makeConfig({ twitter: { bearerToken: '' } });
+      const trader = new LiveTrader({ config });
+      expect(trader.twitterCrawler).toBeNull();
+    });
+
+    it('does not initialize TwitterCrawler when twitter config is missing', () => {
+      const config = makeConfig();
+      // Default config has empty bearerToken
+      const trader = new LiveTrader({ config });
+      expect(trader.twitterCrawler).toBeNull();
+    });
+
+    it('fetches Twitter sentiment in updateSentiment()', async () => {
+      const config = makeConfig({ twitter: { bearerToken: 'test-token' } });
+      const trader = new LiveTrader({ config });
+
+      // Mock the twitter crawler's searchRecent method
+      const mockTweets = [
+        { text: '$BTC to the moon! Bullish 🚀', likes: 100, retweets: 50, quotes: 5, isInfluencer: true, authorFollowers: 50000 },
+        { text: '$BTC looking strong, breakout incoming', likes: 30, retweets: 10, quotes: 2, isInfluencer: false, authorFollowers: 500 },
+      ];
+      trader.twitterCrawler.searchRecent = vi.fn().mockResolvedValue(mockTweets);
+
+      // Mock news to return empty (isolate twitter testing)
+      trader.newsCrawler.fetchAllFeeds = vi.fn().mockResolvedValue([]);
+
+      await trader.updateSentiment();
+
+      // Should have called searchRecent for each symbol
+      expect(trader.twitterCrawler.searchRecent).toHaveBeenCalled();
+      const calls = trader.twitterCrawler.searchRecent.mock.calls;
+      expect(calls.some(c => c[0].includes('BTC'))).toBe(true);
+      expect(calls.some(c => c[0].includes('ETH'))).toBe(true);
+    });
+
+    it('continues when Twitter API fails', async () => {
+      const config = makeConfig({ twitter: { bearerToken: 'test-token' } });
+      const trader = new LiveTrader({ config });
+
+      // Mock twitter to throw
+      trader.twitterCrawler.searchRecent = vi.fn().mockRejectedValue(new Error('Rate limited'));
+      // Mock news to return empty
+      trader.newsCrawler.fetchAllFeeds = vi.fn().mockResolvedValue([]);
+
+      // Should not throw
+      await expect(trader.updateSentiment()).resolves.not.toThrow();
+    });
+
+    it('aggregates Twitter scores into sentiment cache', async () => {
+      const config = makeConfig({ twitter: { bearerToken: 'test-token' } });
+      config.trading.symbols = ['BTCUSDT'];
+      const trader = new LiveTrader({ config });
+
+      // Mock twitter with strongly bullish tweets
+      trader.twitterCrawler.searchRecent = vi.fn().mockResolvedValue([
+        { text: '$BTC to the moon! Bullish rally 🚀', likes: 200, retweets: 100, quotes: 10, isInfluencer: true, authorFollowers: 50000 },
+        { text: '$BTC breakout! Diamond hands!', likes: 100, retweets: 50, quotes: 5, isInfluencer: false, authorFollowers: 5000 },
+      ]);
+      // Mock news to return empty
+      trader.newsCrawler.fetchAllFeeds = vi.fn().mockResolvedValue([]);
+
+      await trader.updateSentiment();
+
+      // Sentiment should have been set on the realtime trader
+      const cached = trader.realtimeTrader.sentimentCache.get('BTCUSDT');
+      expect(cached).toBeDefined();
+      expect(cached.count).toBeGreaterThan(0);
+      expect(cached.classification).toMatch(/bullish/);
+    });
   });
 });

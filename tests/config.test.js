@@ -111,4 +111,15 @@ describe('Config Module', () => {
       expect(result.valid).toBe(false);
     });
   });
+
+  it('loads Twitter bearer token from .env', () => {
+    writeFileSync(envFile, 'TWITTER_BEARER_TOKEN=my-twitter-token');
+    const config = loadConfig(envFile);
+    expect(config.twitter.bearerToken).toBe('my-twitter-token');
+  });
+
+  it('defaults Twitter bearer token to empty string', () => {
+    const config = loadConfig(join(tmpDir, 'nonexistent'));
+    expect(config.twitter.bearerToken).toBe('');
+  });
 });
