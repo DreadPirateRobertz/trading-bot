@@ -20,3 +20,6 @@ export { CandleStore, HistoricalFetcher, DataPipeline, computeAllFeatures } from
 
 // Phase 5: MCP server for AI-driven trade management
 export { createMcpServer, startMcpServer, TradingBotState } from './mcp/index.js';
+
+// Phase 6: Portfolio risk management
+export { PortfolioRiskManager } from './risk/portfolio-risk-manager.js';

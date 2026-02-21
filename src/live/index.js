@@ -7,6 +7,7 @@ import { BinanceConnector } from '../market-data/binance.js';
 import { RedditCrawler } from '../sentiment/reddit.js';
 import { NewsCrawler } from '../sentiment/news.js';
 import { scoreSentiment, aggregateScores } from '../sentiment/scorer.js';
+import { PortfolioRiskManager } from '../risk/portfolio-risk-manager.js';
 
 export class LiveTrader {
   constructor({ config, onSignal, onTrade, onError, onStatus }) {
@@ -41,6 +42,12 @@ export class LiveTrader {
       : null;
     this.newsCrawler = new NewsCrawler();
 
+    // Portfolio risk manager
+    this.riskManager = new PortfolioRiskManager(config.risk || {});
+    if (config.sectors) this.riskManager.setSectors(config.sectors);
+    this.riskManager.update({ equity: config.trading.initialBalance, bar: 0 });
+    this.riskManager.startNewDay(config.trading.initialBalance);
+
     // State
     this.wsConnections = [];
     this.sentimentInterval = null;
@@ -49,6 +56,7 @@ export class LiveTrader {
     this.signalLog = [];
     this.tradeLog = [];
     this.errorLog = [];
+    this.barCount = 0;
   }
 
   async seedHistoricalData() {
@@ -242,12 +250,62 @@ export class LiveTrader {
     this.running = true;
     this.startTime = Date.now();
 
-    // Wrap callbacks to capture logs
+    // Wrap callbacks to capture logs and enforce risk limits
     const origOnSignal = this.realtimeTrader.onSignal;
     this.realtimeTrader.onSignal = (analysis) => {
       this.signalLog.push({ time: Date.now(), ...analysis });
       if (this.signalLog.length > 1000) this.signalLog = this.signalLog.slice(-500);
       origOnSignal(analysis);
+    };
+
+    // Intercept trade execution to enforce risk limits
+    const origExecuteTrade = this.realtimeTrader.executeTrade.bind(this.realtimeTrader);
+    this.realtimeTrader.executeTrade = (analysis) => {
+      const { symbol, price, signal } = analysis;
+      if (signal && signal.action === 'BUY') {
+        // Update risk manager with current portfolio state
+        this.barCount++;
+        const status = this.realtimeTrader.getStatus();
+        const positions = {};
+        for (const [sym, buf] of this.realtimeTrader.priceBuffers) {
+          const pos = this.realtimeTrader.trader.getPosition(sym);
+          if (pos) {
+            positions[sym] = {
+              qty: pos.qty,
+              avgPrice: pos.avgPrice,
+              currentPrice: buf.closes.length > 0 ? buf.closes[buf.closes.length - 1] : pos.avgPrice,
+            };
+          }
+        }
+        this.riskManager.update({
+          equity: this.realtimeTrader.trader.portfolioValue,
+          positions,
+          bar: this.barCount,
+        });
+
+        // Evaluate risk
+        const sizing = this.realtimeTrader.positionSizer.calculate({
+          portfolioValue: this.realtimeTrader.trader.portfolioValue,
+          price,
+          confidence: signal.confidence,
+        });
+        const riskCheck = this.riskManager.evaluateTrade({
+          symbol,
+          side: 'buy',
+          qty: sizing.qty,
+          price,
+        });
+
+        if (!riskCheck.allowed) {
+          this.onStatus({ event: 'risk_blocked', symbol, reason: riskCheck.reason, flags: riskCheck.riskFlags });
+          return null;
+        }
+      }
+      const result = origExecuteTrade(analysis);
+      if (result) {
+        this.riskManager.recordTrade(result.symbol);
+      }
+      return result;
     };
 
     const origOnTrade = this.realtimeTrader.onTrade;
@@ -292,6 +350,7 @@ export class LiveTrader {
       uptime: this.startTime ? Date.now() - this.startTime : 0,
       portfolio: traderStatus.portfolio,
       buffers: traderStatus.buffers,
+      risk: this.riskManager.getRiskDashboard(),
       recentSignals: this.signalLog.slice(-20),
       recentTrades: this.tradeLog.slice(-50),
       recentErrors: this.errorLog.slice(-20),
