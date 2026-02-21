@@ -145,3 +145,45 @@ Transform the existing spot trading bot into a **high-leverage futures trading s
 | **algo** | Epic 1, Epic 6 | Exchange connector, order routing, dashboard |
 | **strategist** | Epic 3 | 4 YOLO strategies, entry/exit rules |
 | **tester** | Epic 5 | Leverage backtesting, stress tests, data |
+
+---
+
+### Tester (tester)
+
+**Current State:**
+- **42 test files, 839 tests** — 39 passing files, 3 failing (MCP SDK missing dep)
+- Runtime: ~8s, all unit/integration, no external services required
+- Framework: Vitest v4.0.18, Node.js, better-sqlite3
+
+**Coverage by Module:**
+
+| Module | Files | Focus |
+|--------|-------|-------|
+| ML/AI | 8 | Model training, features, ensemble, pipeline, stress |
+| Strategies | 4 | Signal engine, multi-timeframe, pairs trading |
+| Risk | 4 | Kelly criterion, VaR/CVaR, position sizing, portfolio risk |
+| Backtesting | 4 | Walk-forward, historical validation, pairs backtest |
+| Paper/Live | 4 | Paper trading, ML stress, live trading |
+| Market Data | 3 | Data pipeline, validation, realtime feeds |
+| Sentiment | 3 | News, Reddit, Twitter |
+| Infra | 4 | Config, dashboard, notifications, reports |
+| MCP | 2 | MCP server tools (BLOCKED: missing @modelcontextprotocol/sdk) |
+| Integration | 2 | E2E, extended session |
+
+**Known Issues:**
+1. MCP tests (2 files): `@modelcontextprotocol/sdk` not installed — import fails at load
+2. 1 flaky test: intermittent stress test timing issue
+
+**Testing Principles:**
+- All tests run offline with mocked data — no API keys or network
+- Deterministic math (Kelly, VaR) uses known-answer verification
+- ML tests validate pipeline shape/contracts, not model accuracy
+- Stress tests simulate flash crashes, extreme vol, regime changes
+
+**Gaps (for when rig resumes):**
+- No coverage for order execution layer
+- No property-based / fuzz testing
+- MCP dep needs resolving to unblock 2 test files
+- No performance regression benchmarks
+
+**Epic 5 readiness:** Ready to build leverage-aware backtests and liquidation stress tests when Phase 2 starts.

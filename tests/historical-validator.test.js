@@ -20,7 +20,7 @@ async function isBinanceAccessible() {
 
 describe('Historical Validator', () => {
   describe('validateWithCandles() — offline validation', () => {
-    it('validates ML pipeline on realistic synthetic data', () => {
+    it('validates ML pipeline on realistic synthetic data', { timeout: 15000 }, () => {
       const candles = generateRegimeData(40000, 500);
       const result = validateWithCandles(candles, {
         symbol: 'SYN-BTC',

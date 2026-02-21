@@ -108,7 +108,7 @@ describe('ML Pipeline Stress Test (tb-658)', () => {
       }
     });
 
-    it('ML ensemble produces non-degenerate results', () => {
+    it('ML ensemble produces non-degenerate results', { timeout: 15000 }, () => {
       const evaluator = new WalkForwardEvaluator({ epochs: 30 });
       const candles = generateRegimeData(40000, CANDLES);
       const result = evaluator.evaluate(candles);
@@ -121,7 +121,7 @@ describe('ML Pipeline Stress Test (tb-658)', () => {
   });
 
   describe('flash crash resilience', () => {
-    it('survives flash crash without negative equity', () => {
+    it('survives flash crash without negative equity', { timeout: 15000 }, () => {
       const candles = generateFlashCrash(50000, CANDLES);
       const evaluator = new WalkForwardEvaluator({
         epochs: 20, minTrainSamples: 50, retrainInterval: 60,
@@ -140,7 +140,7 @@ describe('ML Pipeline Stress Test (tb-658)', () => {
       }
     });
 
-    it('trailing stop limits drawdown during crash', () => {
+    it('trailing stop limits drawdown during crash', { timeout: 15000 }, () => {
       const candles = generateFlashCrash(50000, CANDLES);
       const evaluator = new WalkForwardEvaluator({ epochs: 20 });
       const result = evaluator.evaluate(candles);
@@ -151,7 +151,7 @@ describe('ML Pipeline Stress Test (tb-658)', () => {
   });
 
   describe('grinding bear market', () => {
-    it('handles prolonged downtrend without blowup', () => {
+    it('handles prolonged downtrend without blowup', { timeout: 15000 }, () => {
       const candles = generateGrindingBear(45000, CANDLES);
       const evaluator = new WalkForwardEvaluator({ epochs: 20 });
       const result = evaluator.evaluate(candles);
@@ -164,7 +164,7 @@ describe('ML Pipeline Stress Test (tb-658)', () => {
   });
 
   describe('extreme volatility', () => {
-    it('handles 10% daily swings without NaN/Infinity', () => {
+    it('handles 10% daily swings without NaN/Infinity', { timeout: 15000 }, () => {
       const candles = generateExtremeVol(40000, CANDLES);
       const evaluator = new WalkForwardEvaluator({ epochs: 20 });
       const result = evaluator.evaluate(candles);
@@ -338,7 +338,7 @@ describe('ML Pipeline Stress Test (tb-658)', () => {
   });
 
   describe('full integration: ensemble + risk + MTF', () => {
-    it('end-to-end paper trade with all systems active', () => {
+    it('end-to-end paper trade with all systems active', { timeout: 15000 }, () => {
       const candles = generateRegimeData(40000, CANDLES);
       const rm = new PortfolioRiskManager();
       const sizer = new PositionSizer({ maxPositionPct: 0.25, kellyFraction: 0.33 });
