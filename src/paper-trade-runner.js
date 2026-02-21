@@ -8,6 +8,8 @@ import { Backtester, computeMaxDrawdown, computeSharpeRatio } from './backtest/i
 import { MomentumStrategy } from './strategies/momentum.js';
 import { MeanReversionStrategy } from './strategies/mean-reversion.js';
 import { EnsembleStrategy } from './strategies/ensemble.js';
+import { BollingerBounceStrategy } from './strategies/bollinger-bounce.js';
+import { HybridStrategy } from './strategies/hybrid.js';
 import { PaperTrader } from './paper-trading/index.js';
 import { PositionSizer } from './signals/position-sizer.js';
 
@@ -75,6 +77,12 @@ function runStrategyBacktest(strategyName, strategyFn, candles, { initialBalance
   const signals = [];
   const lookback = 60;
 
+  // Trailing stop state
+  let highWaterMark = 0;
+  let entryPrice = 0;
+  const TRAILING_STOP_PCT = 0.15; // 15% trailing stop (crypto needs wider stops)
+  const TAKE_PROFIT_PCT = 0.25;   // 25% take profit (scale out half)
+
   for (let i = lookback; i < candles.length; i++) {
     const closes = candles.slice(0, i + 1).map(c => c.close);
     const currentPrice = candles[i].close;
@@ -92,9 +100,36 @@ function runStrategyBacktest(strategyName, strategyFn, candles, { initialBalance
       regime: candles[i].regime || 'unknown',
     });
 
+    const pos = trader.getPosition('asset');
+
+    // Check trailing stop and take profit on existing positions
+    if (pos) {
+      highWaterMark = Math.max(highWaterMark, currentPrice);
+      const drawdownFromPeak = (highWaterMark - currentPrice) / highWaterMark;
+      const profitFromEntry = (currentPrice - entryPrice) / entryPrice;
+
+      // Trailing stop: sell all if price drops TRAILING_STOP_PCT from peak
+      if (drawdownFromPeak >= TRAILING_STOP_PCT) {
+        trader.sell('asset', pos.qty, currentPrice);
+        highWaterMark = 0;
+        entryPrice = 0;
+        const equity = trader.cash;
+        equityCurve.push(equity);
+        continue;
+      }
+
+      // Take profit: sell half at TAKE_PROFIT_PCT gain
+      if (profitFromEntry >= TAKE_PROFIT_PCT && pos.qty > 1) {
+        const halfQty = Math.floor(pos.qty / 2);
+        if (halfQty > 0) {
+          trader.sell('asset', halfQty, currentPrice);
+        }
+      }
+    }
+
+    // Strategy signal execution
     if (result.action === 'BUY' && result.confidence > 0.05) {
-      const existingPos = trader.getPosition('asset');
-      if (!existingPos) {
+      if (!pos) {
         const sizing = sizer.calculate({
           portfolioValue: trader.portfolioValue,
           price: currentPrice,
@@ -102,26 +137,30 @@ function runStrategyBacktest(strategyName, strategyFn, candles, { initialBalance
         });
         if (sizing.qty > 0) {
           trader.buy('asset', sizing.qty, currentPrice);
+          entryPrice = currentPrice;
+          highWaterMark = currentPrice;
         }
       }
     } else if (result.action === 'SELL') {
-      const pos = trader.getPosition('asset');
-      if (pos) {
-        trader.sell('asset', pos.qty, currentPrice);
+      const currentPos = trader.getPosition('asset');
+      if (currentPos) {
+        trader.sell('asset', currentPos.qty, currentPrice);
+        highWaterMark = 0;
+        entryPrice = 0;
       }
     }
 
     // Mark to market for equity curve
-    const pos = trader.getPosition('asset');
-    const equity = trader.cash + (pos ? pos.qty * currentPrice : 0);
+    const finalPos = trader.getPosition('asset');
+    const equity = trader.cash + (finalPos ? finalPos.qty * currentPrice : 0);
     equityCurve.push(equity);
   }
 
   // Close remaining positions
-  const finalPos = trader.getPosition('asset');
-  if (finalPos) {
+  const remainingPos = trader.getPosition('asset');
+  if (remainingPos) {
     const finalPrice = candles[candles.length - 1].close;
-    trader.sell('asset', finalPos.qty, finalPrice);
+    trader.sell('asset', remainingPos.qty, finalPrice);
   }
 
   return computeResults(strategyName, trader, signals, equityCurve, initialBalance);
@@ -276,18 +315,18 @@ export function runSession(sessionNum, { seed, numCandles = 365 } = {}) {
   // Instantiate strategies once per session (stateful)
   const mom30 = new MomentumStrategy({ lookback: 30 });
   const mom7 = new MomentumStrategy({ lookback: 7, targetRisk: 0.015 });
-  const mrZ20 = new MeanReversionStrategy({ entryZScore: 2.0 });
   const mrZ15 = new MeanReversionStrategy({ entryZScore: 1.5, exitZScore: 0.3 });
-  const ensFixed = new EnsembleStrategy({ weights: { momentum: 0.5, meanReversion: 0.5 } });
+  const bbBounce = new BollingerBounceStrategy({ percentBBuy: 0.10, percentBSell: 0.90 });
+  const hybrid = new HybridStrategy();
   const mom7Aggressive = new MomentumStrategy({ lookback: 7, targetRisk: 0.03, entryThreshold: -0.01 });
 
   const strategies = [
-    { name: 'Momentum-30d', fn: (closes) => mom30.generateSignal(closes) },
     { name: 'Momentum-7d', fn: (closes) => mom7.generateSignal(closes) },
     { name: 'Mom-7d-Aggr', fn: (closes) => mom7Aggressive.generateSignal(closes) },
-    { name: 'MeanRev-Z2.0', fn: (closes) => mrZ20.generateSignal(closes) },
+    { name: 'BB-Bounce', fn: (closes) => bbBounce.generateSignal(closes) },
     { name: 'MeanRev-Z1.5', fn: (closes) => mrZ15.generateSignal(closes) },
-    { name: 'Ensemble-50/50', fn: (closes) => ensFixed.generateSignal(closes) },
+    { name: 'Hybrid-MomBB', fn: (closes) => hybrid.generateSignal(closes) },
+    { name: 'Momentum-30d', fn: (closes) => mom30.generateSignal(closes) },
   ];
 
   const results = strategies.map(s =>
