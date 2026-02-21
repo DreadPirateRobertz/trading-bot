@@ -7,6 +7,9 @@ function makeConfig(overrides = {}) {
     binance: { apiKey: '', secretKey: '', testnet: true },
     reddit: { clientId: '', clientSecret: '', userAgent: 'test' },
     twitter: { bearerToken: '' },
+    hmm: { enabled: false }, // disabled by default in tests for speed
+    risk: {},
+    alerts: {},
     trading: {
       symbols: ['BTCUSDT', 'ETHUSDT'],
       initialBalance: 100000,
@@ -363,6 +366,110 @@ describe('LiveTrader', () => {
       expect(cached).toBeDefined();
       expect(cached.count).toBeGreaterThan(0);
       expect(cached.classification).toMatch(/bullish/);
+    });
+  });
+
+  describe('HMM regime detection integration', () => {
+    // Helper: generate candle-like data and feed into trader buffers
+    function feedCandles(trader, symbol, n, { drift = 0.001, vol = 0.02 } = {}) {
+      let price = 50000;
+      for (let i = 0; i < n; i++) {
+        const ret = drift + vol * (Math.random() - 0.5) * 2;
+        const open = price;
+        price = price * Math.exp(ret);
+        trader.realtimeTrader.feedPrice(symbol, {
+          open, close: price,
+          high: Math.max(open, price) * 1.005,
+          low: Math.min(open, price) * 0.995,
+          volume: 1000 + Math.random() * 5000,
+          timestamp: Date.now() + i * 60000,
+        });
+      }
+    }
+
+    it('does not train HMM when disabled', () => {
+      const config = makeConfig({ hmm: { enabled: false } });
+      const trader = new LiveTrader({ config });
+      const result = trader.trainHMM();
+      expect(result).toBeNull();
+      expect(trader.hmm).toBeNull();
+    });
+
+    it('skips HMM training with insufficient data', () => {
+      const statuses = [];
+      const config = makeConfig({
+        hmm: { enabled: true, minObservations: 50 },
+      });
+      const trader = new LiveTrader({ config, onStatus: (s) => statuses.push(s) });
+
+      // Feed only a few candles — not enough for HMM
+      feedCandles(trader, 'BTCUSDT', 20);
+
+      const result = trader.trainHMM();
+      expect(result).toBeNull();
+      expect(statuses.some(s => s.event === 'hmm_skip')).toBe(true);
+    });
+
+    it('trains HMM when enough candle data is available', () => {
+      const statuses = [];
+      const config = makeConfig({
+        hmm: { enabled: true, minObservations: 30 },
+      });
+      const trader = new LiveTrader({ config, onStatus: (s) => statuses.push(s) });
+
+      // Feed enough candles for HMM training
+      feedCandles(trader, 'BTCUSDT', 100);
+
+      const result = trader.trainHMM();
+      expect(result).not.toBeNull();
+      expect(result.regime).toBeDefined();
+      expect(result.confidence).toBeGreaterThan(0);
+      expect(trader.hmm).not.toBeNull();
+      expect(trader.hmm.trained).toBe(true);
+      expect(statuses.some(s => s.event === 'hmm_trained')).toBe(true);
+    });
+
+    it('injects HMM into ensemble strategy', () => {
+      const config = makeConfig({
+        hmm: { enabled: true, minObservations: 30 },
+        signalEngine: { strategy: 'ensemble', strategyConfig: {} },
+      });
+      const trader = new LiveTrader({ config });
+
+      // Feed data and train
+      feedCandles(trader, 'BTCUSDT', 100);
+      trader.trainHMM();
+
+      // The ensemble strategy should now have the HMM detector
+      const strategy = trader.realtimeTrader.signalEngine.strategy;
+      expect(strategy).toBeDefined();
+      expect(strategy.hmmDetector).toBe(trader.hmm);
+    });
+
+    it('includes HMM status in getFullStatus()', () => {
+      const config = makeConfig({
+        hmm: { enabled: true, minObservations: 30 },
+      });
+      const trader = new LiveTrader({ config });
+
+      feedCandles(trader, 'BTCUSDT', 100);
+      trader.trainHMM();
+
+      const status = trader.getFullStatus();
+      expect(status.hmm).toBeDefined();
+      expect(status.hmm.trained).toBe(true);
+      expect(status.hmm.states).toContain('bull');
+      expect(status.hmm.states).toContain('bear');
+    });
+
+    it('cleans up HMM retrain interval on stop', async () => {
+      const config = makeConfig({
+        hmm: { enabled: true, minObservations: 30, retrainInterval: 100 },
+      });
+      const trader = new LiveTrader({ config });
+      await trader.start(null);
+      trader.stop();
+      expect(trader.hmmRetrainInterval_id).toBeNull();
     });
   });
 });

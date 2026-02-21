@@ -10,17 +10,31 @@ import { TwitterCrawler } from '../sentiment/twitter.js';
 import { scoreSentiment, scoreTweet, aggregateScores } from '../sentiment/scorer.js';
 import { PortfolioRiskManager } from '../risk/portfolio-risk-manager.js';
 import { Notifier } from '../alerts/notifier.js';
+import { GaussianHMM } from '../ml/hmm.js';
 
 export class LiveTrader {
   constructor({ config, onSignal, onTrade, onError, onStatus }) {
     this.config = config;
     this.onStatus = onStatus || (() => {});
 
+    // HMM regime detection config
+    this.useHMM = config.hmm?.enabled !== false; // on by default
+    this.hmmRetrainInterval = config.hmm?.retrainInterval || 500; // retrain every N bars
+    this.hmmMinObs = config.hmm?.minObservations || 50;
+    this.hmm = null;
+    this.hmmBarsSinceRetrain = 0;
+
     // Initialize RealtimeTrader (paper trading engine underneath)
+    // Use ensemble strategy when HMM is enabled
+    const signalEngineConfig = config.signalEngine || (this.useHMM
+      ? { strategy: 'ensemble', strategyConfig: {} }
+      : undefined);
+
     this.realtimeTrader = new RealtimeTrader({
       initialBalance: config.trading.initialBalance,
       symbols: config.trading.symbols,
       lookback: config.trading.lookback,
+      signalEngineConfig,
       positionSizerConfig: {
         maxPositionPct: config.trading.maxPositionPct,
         yoloThreshold: config.trading.yoloThreshold,
@@ -108,6 +122,51 @@ export class LiveTrader {
         this.onStatus({ event: 'seed_error', symbol, error: err.message });
       }
     }
+  }
+
+  // Train HMM on available candle buffers and inject into ensemble strategy
+  trainHMM() {
+    if (!this.useHMM) return null;
+
+    // Collect all candle buffers across symbols
+    const allCandles = [];
+    for (const [, buffer] of this.realtimeTrader.priceBuffers) {
+      if (buffer.candles.length > 0) {
+        allCandles.push(...buffer.candles);
+      }
+    }
+
+    const obs = GaussianHMM.extractObservations(allCandles, { volWindow: 20 });
+    if (obs.length < this.hmmMinObs) {
+      this.onStatus({ event: 'hmm_skip', reason: `Insufficient observations: ${obs.length}/${this.hmmMinObs}` });
+      return null;
+    }
+
+    const hmm = new GaussianHMM();
+    const result = hmm.fit(obs);
+
+    if (hmm.trained) {
+      this.hmm = hmm;
+      this.hmmBarsSinceRetrain = 0;
+
+      // Inject into ensemble strategy if available
+      const strategy = this.realtimeTrader.signalEngine.strategy;
+      if (strategy && typeof strategy.detectRegimeHMM === 'function') {
+        strategy.hmmDetector = hmm;
+      }
+
+      const regime = hmm.currentRegime(obs);
+      this.onStatus({
+        event: 'hmm_trained',
+        observations: obs.length,
+        logLikelihood: result.logLikelihood,
+        currentRegime: regime.regime,
+        confidence: regime.confidence,
+      });
+      return regime;
+    }
+
+    return null;
   }
 
   connectBinanceWS(WebSocketClass) {
@@ -358,6 +417,9 @@ export class LiveTrader {
     // Seed historical data
     await this.seedHistoricalData();
 
+    // Train HMM on seeded data for regime detection
+    this.trainHMM();
+
     // Connect WebSockets
     if (WebSocketClass) {
       this.connectBinanceWS(WebSocketClass);
@@ -366,6 +428,16 @@ export class LiveTrader {
 
     // Start sentiment loop
     this.startSentimentLoop();
+
+    // Start HMM retraining loop
+    if (this.useHMM && this.hmmRetrainInterval > 0) {
+      this.hmmRetrainInterval_id = setInterval(() => {
+        this.hmmBarsSinceRetrain++;
+        if (this.hmmBarsSinceRetrain >= this.hmmRetrainInterval) {
+          this.trainHMM();
+        }
+      }, 60000); // Check every minute
+    }
 
     this.onStatus({ event: 'started', symbols: this.config.trading.symbols });
   }
@@ -380,6 +452,10 @@ export class LiveTrader {
       clearInterval(this.sentimentInterval);
       this.sentimentInterval = null;
     }
+    if (this.hmmRetrainInterval_id) {
+      clearInterval(this.hmmRetrainInterval_id);
+      this.hmmRetrainInterval_id = null;
+    }
     this.onStatus({ event: 'stopped' });
   }
 
@@ -392,6 +468,11 @@ export class LiveTrader {
       portfolio: traderStatus.portfolio,
       buffers: traderStatus.buffers,
       risk: this.riskManager.getRiskDashboard(),
+      hmm: this.hmm ? {
+        trained: this.hmm.trained,
+        states: this.hmm.states,
+        barsSinceRetrain: this.hmmBarsSinceRetrain,
+      } : null,
       recentSignals: this.signalLog.slice(-20),
       recentTrades: this.tradeLog.slice(-50),
       recentErrors: this.errorLog.slice(-20),

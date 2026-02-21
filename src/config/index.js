@@ -70,6 +70,13 @@ export function loadConfig(envPath) {
       bearerToken: get('TWITTER_BEARER_TOKEN', ''),
     },
 
+    // HMM regime detection
+    hmm: {
+      enabled: getBool('HMM_ENABLED', true),
+      retrainInterval: getNum('HMM_RETRAIN_INTERVAL', 500),
+      minObservations: getNum('HMM_MIN_OBSERVATIONS', 50),
+    },
+
     // Trading params
     trading: {
       symbols: get('TRADING_SYMBOLS', 'BTCUSDT,ETHUSDT').split(',').map(s => s.trim()),
