@@ -156,11 +156,14 @@ describe('ML Module Exports', () => {
     expect(ml.CLASS_NAMES).toEqual(['BUY', 'HOLD', 'SELL']);
   });
 
-  it('main index.js exports ML modules', async () => {
-    const main = await import('../src/index.js');
-    expect(main.NeuralNetwork).toBeTypeOf('function');
-    expect(main.Trainer).toBeTypeOf('function');
-    expect(main.MLSignalEnhancer).toBeTypeOf('function');
-    expect(main.extractFeatures).toBeTypeOf('function');
+  it('ML modules are importable from ml/index.js barrel', async () => {
+    // Note: main src/index.js also re-exports these, but we test the direct
+    // import to avoid coupling with other modules (e.g. data-pipeline deps)
+    const ml = await import('../src/ml/index.js');
+    expect(ml.NeuralNetwork).toBeTypeOf('function');
+    expect(ml.Trainer).toBeTypeOf('function');
+    expect(ml.MLSignalEnhancer).toBeTypeOf('function');
+    expect(ml.extractFeatures).toBeTypeOf('function');
+    expect(ml.generateTrainingData).toBeTypeOf('function');
   });
 });
