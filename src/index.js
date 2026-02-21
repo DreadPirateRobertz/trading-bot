@@ -14,3 +14,6 @@ export { RealtimeTrader } from './realtime/index.js';
 export { loadConfig, validateConfig } from './config/index.js';
 export { LiveTrader } from './live/index.js';
 export { createDashboard } from './dashboard/index.js';
+
+// Phase 4: Historical OHLCV data pipeline + feature engineering
+export { CandleStore, HistoricalFetcher, DataPipeline, computeAllFeatures } from './data-pipeline/index.js';
