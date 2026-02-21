@@ -313,20 +313,20 @@ export function runSession(sessionNum, { seed, numCandles = 365 } = {}) {
   const regimes = [...new Set(candles.map(c => c.regime).filter(Boolean))];
 
   // Instantiate strategies once per session (stateful)
-  const mom30 = new MomentumStrategy({ lookback: 30 });
   const mom7 = new MomentumStrategy({ lookback: 7, targetRisk: 0.015 });
+  const mom14 = new MomentumStrategy({ lookback: 14, targetRisk: 0.02 });
   const mrZ15 = new MeanReversionStrategy({ entryZScore: 1.5, exitZScore: 0.3 });
   const bbBounce = new BollingerBounceStrategy({ percentBBuy: 0.10, percentBSell: 0.90 });
+  const bbConservative = new BollingerBounceStrategy({ percentBBuy: 0.0, percentBSell: 1.0, rsiBuyThreshold: 35, rsiSellThreshold: 65 });
   const hybrid = new HybridStrategy();
-  const mom7Aggressive = new MomentumStrategy({ lookback: 7, targetRisk: 0.03, entryThreshold: -0.01 });
 
   const strategies = [
     { name: 'Momentum-7d', fn: (closes) => mom7.generateSignal(closes) },
-    { name: 'Mom-7d-Aggr', fn: (closes) => mom7Aggressive.generateSignal(closes) },
+    { name: 'Momentum-14d', fn: (closes) => mom14.generateSignal(closes) },
     { name: 'BB-Bounce', fn: (closes) => bbBounce.generateSignal(closes) },
+    { name: 'BB-Conservative', fn: (closes) => bbConservative.generateSignal(closes) },
     { name: 'MeanRev-Z1.5', fn: (closes) => mrZ15.generateSignal(closes) },
     { name: 'Hybrid-MomBB', fn: (closes) => hybrid.generateSignal(closes) },
-    { name: 'Momentum-30d', fn: (closes) => mom30.generateSignal(closes) },
   ];
 
   const results = strategies.map(s =>
