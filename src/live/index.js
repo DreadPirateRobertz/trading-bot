@@ -8,6 +8,7 @@ import { RedditCrawler } from '../sentiment/reddit.js';
 import { NewsCrawler } from '../sentiment/news.js';
 import { scoreSentiment, aggregateScores } from '../sentiment/scorer.js';
 import { PortfolioRiskManager } from '../risk/portfolio-risk-manager.js';
+import { Notifier } from '../alerts/notifier.js';
 
 export class LiveTrader {
   constructor({ config, onSignal, onTrade, onError, onStatus }) {
@@ -47,6 +48,9 @@ export class LiveTrader {
     if (config.sectors) this.riskManager.setSectors(config.sectors);
     this.riskManager.update({ equity: config.trading.initialBalance, bar: 0 });
     this.riskManager.startNewDay(config.trading.initialBalance);
+
+    // Alert notifier
+    this.notifier = new Notifier(config.alerts || {});
 
     // State
     this.wsConnections = [];
@@ -298,6 +302,15 @@ export class LiveTrader {
 
         if (!riskCheck.allowed) {
           this.onStatus({ event: 'risk_blocked', symbol, reason: riskCheck.reason, flags: riskCheck.riskFlags });
+          // Fire risk event alert (non-blocking)
+          const alertType = riskCheck.riskFlags.includes('circuit_breaker') ? 'circuit_breaker' : 'risk_blocked';
+          if (alertType === 'circuit_breaker') {
+            this.notifier.circuitBreaker({ reason: riskCheck.reason }).catch(() => {});
+          } else {
+            this.notifier.riskEvent({
+              type: alertType, reason: riskCheck.reason, flags: riskCheck.riskFlags, symbol,
+            }).catch(() => {});
+          }
           return null;
         }
       }
@@ -311,6 +324,16 @@ export class LiveTrader {
     const origOnTrade = this.realtimeTrader.onTrade;
     this.realtimeTrader.onTrade = (trade) => {
       this.tradeLog.push({ time: Date.now(), ...trade });
+      // Fire trade alert (non-blocking)
+      this.notifier.tradeExecuted({
+        symbol: trade.symbol,
+        action: trade.action,
+        qty: trade.qty,
+        price: trade.price,
+        pnl: trade.pnl,
+        confidence: trade.sizing?.positionPct || 0,
+        method: trade.sizing?.method,
+      }).catch(() => {}); // alerts are best-effort
       origOnTrade(trade);
     };
 

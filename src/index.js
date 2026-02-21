@@ -26,3 +26,6 @@ export { PortfolioRiskManager } from './risk/portfolio-risk-manager.js';
 
 // Phase 6: Multi-timeframe analysis
 export { MultiTimeframeAnalyzer } from './analysis/multi-timeframe.js';
+
+// Phase 6: Alert & notification system
+export { Notifier, ALERT_TYPES, SEVERITY } from './alerts/notifier.js';
