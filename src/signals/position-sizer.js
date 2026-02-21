@@ -142,6 +142,73 @@ export class PositionSizer {
     return weights;
   }
 
+  // Value at Risk (VaR) — parametric, assuming normal returns
+  // Returns the maximum expected loss at a given confidence level
+  // confidenceLevel: 0.95 = 95% VaR, 0.99 = 99% VaR
+  calculateVaR(returns, confidenceLevel = 0.95) {
+    if (!returns || returns.length < 10) return null;
+
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
+    const stdDev = Math.sqrt(variance);
+
+    // Z-scores for common confidence levels
+    const zScores = { 0.90: 1.282, 0.95: 1.645, 0.99: 2.326 };
+    const z = zScores[confidenceLevel] || 1.645;
+
+    return -(mean - z * stdDev);
+  }
+
+  // Historical VaR — uses sorted actual returns (non-parametric)
+  calculateHistoricalVaR(returns, confidenceLevel = 0.95) {
+    if (!returns || returns.length < 10) return null;
+    const sorted = [...returns].sort((a, b) => a - b);
+    const idx = Math.floor((1 - confidenceLevel) * sorted.length);
+    return -sorted[idx];
+  }
+
+  // Conditional VaR (Expected Shortfall / CVaR)
+  // Average of losses beyond VaR — captures tail risk
+  calculateCVaR(returns, confidenceLevel = 0.95) {
+    if (!returns || returns.length < 10) return null;
+    const sorted = [...returns].sort((a, b) => a - b);
+    const cutoffIdx = Math.floor((1 - confidenceLevel) * sorted.length);
+    if (cutoffIdx === 0) return -sorted[0];
+
+    const tail = sorted.slice(0, cutoffIdx + 1);
+    const avgTailLoss = tail.reduce((a, b) => a + b, 0) / tail.length;
+    return -avgTailLoss;
+  }
+
+  // VaR-constrained Kelly: caps position so portfolio VaR stays within limit
+  // maxVaRPct: maximum acceptable daily VaR as fraction of portfolio (e.g., 0.02 = 2%)
+  varConstrainedKelly(kellyPct, returns, maxVaRPct = 0.02, confidenceLevel = 0.95) {
+    if (kellyPct <= 0) return 0;
+    if (!returns || returns.length < 10) return kellyPct;
+
+    const var95 = this.calculateVaR(returns, confidenceLevel);
+    if (var95 === null || var95 <= 0) return kellyPct;
+
+    // Scale: if position's VaR exceeds maxVaRPct, scale down proportionally
+    const positionVaR = kellyPct * var95;
+    if (positionVaR <= maxVaRPct) return kellyPct;
+    return (maxVaRPct / var95);
+  }
+
+  // CVaR-constrained Kelly: caps position so tail risk stays within limit
+  // More conservative than VaR — accounts for extreme losses
+  cvarConstrainedKelly(kellyPct, returns, maxCVaRPct = 0.03, confidenceLevel = 0.95) {
+    if (kellyPct <= 0) return 0;
+    if (!returns || returns.length < 10) return kellyPct;
+
+    const cvar = this.calculateCVaR(returns, confidenceLevel);
+    if (cvar === null || cvar <= 0) return kellyPct;
+
+    const positionCVaR = kellyPct * cvar;
+    if (positionCVaR <= maxCVaRPct) return kellyPct;
+    return (maxCVaRPct / cvar);
+  }
+
   // Strategy-aware Kelly: uses STRATEGY-V2 default parameters if no history
   strategyKellySize(strategyName, regime = null, trades = null) {
     // Try rolling estimate from actual trades first
@@ -186,6 +253,9 @@ export class PositionSizer {
     currentDrawdown, // current portfolio drawdown 0-1 (optional)
     strategyName,  // strategy name for default Kelly params (optional)
     trades,        // trade history for rolling Kelly (optional)
+    returns,       // historical returns array for VaR/CVaR constraints (optional)
+    maxVaRPct,     // max acceptable daily VaR as fraction (optional, default 0.02)
+    maxCVaRPct,    // max acceptable daily CVaR as fraction (optional, default 0.03)
   }) {
     if (portfolioValue <= 0 || price <= 0 || confidence <= 0) {
       return { qty: 0, value: 0, method: 'none', reason: 'Invalid inputs' };
@@ -224,6 +294,17 @@ export class PositionSizer {
     if (method && currentDrawdown && currentDrawdown > 0) {
       positionPct = this.drawdownAdjustedKelly(positionPct, currentDrawdown);
       method += '+dd_adjusted';
+    }
+
+    // Apply VaR/CVaR constraints if returns data provided
+    if (method && returns && returns.length >= 10) {
+      if (maxCVaRPct !== undefined) {
+        positionPct = this.cvarConstrainedKelly(positionPct, returns, maxCVaRPct);
+        method += '+cvar';
+      } else if (maxVaRPct !== undefined) {
+        positionPct = this.varConstrainedKelly(positionPct, returns, maxVaRPct);
+        method += '+var';
+      }
     }
 
     // Fallback: confidence-scaled position

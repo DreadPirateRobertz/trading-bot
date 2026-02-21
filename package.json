@@ -8,7 +8,9 @@
     "test": "vitest run",
     "dev": "node src/cli.js paper",
     "start": "node src/cli.js live",
-    "cli": "node src/cli.js"
+    "cli": "node src/cli.js",
+    "report": "node src/report.js",
+    "backtest": "node src/cli.js backtest"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",
