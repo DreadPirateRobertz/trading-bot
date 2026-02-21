@@ -9,6 +9,8 @@ import { PositionSizer } from '../signals/position-sizer.js';
 import { GaussianHMM } from '../ml/hmm.js';
 import { Backtester, PairsBacktester } from '../backtest/index.js';
 import { EnsembleStrategy } from '../strategies/ensemble.js';
+import { WalkForwardEvaluator } from '../ml/walk-forward-evaluator.js';
+import { MultiTimeframeAnalyzer } from '../analysis/multi-timeframe.js';
 
 // Default candle format for examples and validation
 const CandleSchema = z.object({
@@ -432,6 +434,139 @@ export function createServer(options = {}) {
             sortinoRatio: result.sortinoRatio,
             avgDurationBars: result.avgDurationBars,
             exitReasons: result.exitReasons,
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ─── Tool: run_walk_forward ─────────────────────────────────────────
+  server.tool(
+    'run_walk_forward',
+    'Run walk-forward ML evaluation on OHLCV candle data. Trains neural net on expanding windows, ' +
+    'compares ML-ensemble vs rules-only, Bollinger bounce, and momentum baselines. ' +
+    'Returns Sharpe ratios, win rates, and strategy comparison.',
+    {
+      candles: z.array(CandleSchema).min(200).describe('OHLCV candle data (minimum 200 candles)'),
+      initialBalance: z.number().positive().optional().describe('Starting balance (default 100000)'),
+      retrainInterval: z.number().int().positive().optional().describe('Retrain model every N bars (default 60)'),
+      mlWeight: z.number().min(0).max(1).optional().describe('ML signal weight in ensemble (default 0.3)'),
+      slippageBps: z.number().nonnegative().optional().describe('Slippage in basis points (default 5)'),
+      commissionBps: z.number().nonnegative().optional().describe('Commission in basis points (default 10)'),
+    },
+    async ({ candles, initialBalance = 100000, retrainInterval, mlWeight, slippageBps, commissionBps }) => {
+      const config = {};
+      if (retrainInterval) config.retrainInterval = retrainInterval;
+      if (mlWeight !== undefined) config.mlWeight = mlWeight;
+      if (slippageBps !== undefined) config.slippageBps = slippageBps;
+      if (commissionBps !== undefined) config.commissionBps = commissionBps;
+
+      const evaluator = new WalkForwardEvaluator(config);
+      const result = evaluator.evaluate(candles, { initialBalance });
+
+      if (result.error) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: result.error }) }] };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            comparison: result.comparison,
+            mlEnsemble: {
+              name: result.mlEnsemble.name,
+              totalReturn: result.mlEnsemble.totalReturn,
+              sharpeRatio: result.mlEnsemble.sharpeRatio,
+              sortinoRatio: result.mlEnsemble.sortinoRatio,
+              maxDrawdown: result.mlEnsemble.maxDrawdown,
+              totalTrades: result.mlEnsemble.totalTrades,
+              winRate: result.mlEnsemble.winRate,
+              profitFactor: result.mlEnsemble.profitFactor,
+              executionCosts: result.mlEnsemble.executionCosts,
+            },
+            rulesOnlyEnsemble: {
+              name: result.rulesOnlyEnsemble.name,
+              totalReturn: result.rulesOnlyEnsemble.totalReturn,
+              sharpeRatio: result.rulesOnlyEnsemble.sharpeRatio,
+              maxDrawdown: result.rulesOnlyEnsemble.maxDrawdown,
+              totalTrades: result.rulesOnlyEnsemble.totalTrades,
+              winRate: result.rulesOnlyEnsemble.winRate,
+            },
+            bbConservative: {
+              name: result.bbConservative.name,
+              totalReturn: result.bbConservative.totalReturn,
+              sharpeRatio: result.bbConservative.sharpeRatio,
+              maxDrawdown: result.bbConservative.maxDrawdown,
+              totalTrades: result.bbConservative.totalTrades,
+              winRate: result.bbConservative.winRate,
+            },
+            momentum7d: {
+              name: result.momentum7d.name,
+              totalReturn: result.momentum7d.totalReturn,
+              sharpeRatio: result.momentum7d.sharpeRatio,
+              maxDrawdown: result.momentum7d.maxDrawdown,
+              totalTrades: result.momentum7d.totalTrades,
+              winRate: result.momentum7d.winRate,
+            },
+            candleCount: candles.length,
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ─── Tool: analyze_multi_timeframe ────────────────────────────────────
+  server.tool(
+    'analyze_multi_timeframe',
+    'Analyze trends across multiple timeframes from 1-minute candle data. ' +
+    'Aggregates into 5m, 15m, 1h, 4h, 1d timeframes. Returns trend direction, strength, ' +
+    'and hierarchical confirmation for signal filtering.',
+    {
+      candles1m: z.array(CandleSchema.extend({
+        openTime: z.number().optional(),
+        timestamp: z.number().optional(),
+      })).min(60).describe('1-minute OHLCV candle data (minimum 60 candles)'),
+      timeframes: z.array(z.enum(['5m', '15m', '1h', '4h', '1d'])).optional()
+        .describe('Timeframes to analyze (default: all)'),
+      confirmationMode: z.enum(['majority', 'strict', 'weighted']).optional()
+        .describe('How to confirm signals across timeframes (default: majority)'),
+      signal: z.object({
+        action: z.enum(['BUY', 'SELL', 'HOLD']),
+        confidence: z.number().min(0).max(1),
+      }).optional().describe('Optional signal to confirm against higher timeframes'),
+    },
+    async ({ candles1m, timeframes, confirmationMode, signal }) => {
+      const config = {};
+      if (timeframes) config.timeframes = timeframes;
+      if (confirmationMode) config.confirmationMode = confirmationMode;
+
+      const analyzer = new MultiTimeframeAnalyzer(config);
+
+      if (signal) {
+        const confirmation = analyzer.confirmSignal(signal, candles1m);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              confirmed: confirmation.confirmed,
+              adjustedConfidence: confirmation.adjustedConfidence,
+              originalConfidence: confirmation.originalConfidence,
+              alignment: confirmation.alignment,
+              reason: confirmation.reason,
+              trendSummary: confirmation.trendSummary,
+            }, null, 2),
+          }],
+        };
+      }
+
+      const analysis = analyzer.analyze(candles1m);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            confirmation: analysis.confirmation,
+            timeframeCount: analysis.timeframeCount,
+            trends: analysis.trends,
           }, null, 2),
         }],
       };

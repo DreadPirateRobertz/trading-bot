@@ -74,7 +74,9 @@ describe('MCP Server', () => {
       expect(names).toContain('compute_risk_parity');
       expect(names).toContain('compute_portfolio_kelly');
       expect(names).toContain('run_pairs_backtest');
-      expect(names.length).toBe(9);
+      expect(names).toContain('run_walk_forward');
+      expect(names).toContain('analyze_multi_timeframe');
+      expect(names.length).toBe(11);
     });
 
     it('each tool has a description', async () => {
@@ -490,6 +492,139 @@ describe('MCP Server', () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.initialBalance).toBe(50000);
       expect(data.error).toBeUndefined();
+    });
+  });
+
+  describe('run_walk_forward', () => {
+    it('runs walk-forward evaluation and returns strategy comparison', async () => {
+      const { client } = await createTestPair();
+      const candles = makeCandles(300, 40000, 0.015);
+      const result = await client.callTool({
+        name: 'run_walk_forward',
+        arguments: { candles },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.comparison).toBeDefined();
+      expect(typeof data.comparison.mlEnsembleSharpe).toBe('number');
+      expect(typeof data.comparison.bbConservativeSharpe).toBe('number');
+      expect(typeof data.comparison.mlBeatsBB).toBe('boolean');
+      expect(data.mlEnsemble).toBeDefined();
+      expect(data.mlEnsemble.name).toBe('ML-Ensemble');
+      expect(typeof data.mlEnsemble.totalReturn).toBe('number');
+      expect(typeof data.mlEnsemble.sharpeRatio).toBe('number');
+      expect(data.bbConservative).toBeDefined();
+      expect(data.momentum7d).toBeDefined();
+      expect(data.candleCount).toBe(300);
+    }, 15000);
+
+    it('rejects insufficient candle data', async () => {
+      const { client } = await createTestPair();
+      const candles = makeCandles(50);
+      const result = await client.callTool({
+        name: 'run_walk_forward',
+        arguments: { candles },
+      });
+      expect(result.isError).toBe(true);
+    });
+
+    it('accepts custom execution cost parameters', async () => {
+      const { client } = await createTestPair();
+      const candles = makeCandles(300, 40000, 0.015);
+      const result = await client.callTool({
+        name: 'run_walk_forward',
+        arguments: { candles, slippageBps: 10, commissionBps: 20 },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.mlEnsemble.executionCosts).toBeGreaterThanOrEqual(0);
+    }, 15000);
+  });
+
+  describe('analyze_multi_timeframe', () => {
+    // Generate 1-minute candles with openTime
+    function makeCandles1m(n, basePrice = 100) {
+      const candles = [];
+      let price = basePrice;
+      const startTime = Date.now() - n * 60000;
+      for (let i = 0; i < n; i++) {
+        const change = (Math.sin(i * 0.1) * 0.3 + ((i * 13 + 7) % 100 - 50) / 2500) * 0.005 * price;
+        const open = price;
+        const close = price + change;
+        candles.push({
+          openTime: startTime + i * 60000,
+          open,
+          high: Math.max(open, close) * 1.001,
+          low: Math.min(open, close) * 0.999,
+          close,
+          volume: 1000 + ((i * 31) % 500),
+        });
+        price = close;
+      }
+      return candles;
+    }
+
+    it('analyzes trends across multiple timeframes', async () => {
+      const { client } = await createTestPair();
+      const candles1m = makeCandles1m(500);
+      const result = await client.callTool({
+        name: 'analyze_multi_timeframe',
+        arguments: { candles1m },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.confirmation).toBeDefined();
+      expect(data.confirmation.overall).toBeDefined();
+      expect(['bullish', 'bearish', 'mixed']).toContain(data.confirmation.overall);
+      expect(typeof data.confirmation.netBias).toBe('number');
+      expect(data.timeframeCount).toBeGreaterThan(1);
+      expect(data.trends).toBeDefined();
+    });
+
+    it('confirms a BUY signal against higher timeframes', async () => {
+      const { client } = await createTestPair();
+      const candles1m = makeCandles1m(500);
+      const result = await client.callTool({
+        name: 'analyze_multi_timeframe',
+        arguments: {
+          candles1m,
+          signal: { action: 'BUY', confidence: 0.7 },
+        },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(typeof data.confirmed).toBe('boolean');
+      expect(typeof data.adjustedConfidence).toBe('number');
+      expect(data.originalConfidence).toBe(0.7);
+      expect(typeof data.alignment).toBe('number');
+      expect(data.reason).toBeDefined();
+    });
+
+    it('accepts custom timeframes and confirmation mode', async () => {
+      const { client } = await createTestPair();
+      const candles1m = makeCandles1m(300);
+      const result = await client.callTool({
+        name: 'analyze_multi_timeframe',
+        arguments: {
+          candles1m,
+          timeframes: ['5m', '15m', '1h'],
+          confirmationMode: 'strict',
+        },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.trends).toBeDefined();
+      expect(data.confirmation).toBeDefined();
+    });
+
+    it('returns no confirmation for HOLD signal', async () => {
+      const { client } = await createTestPair();
+      const candles1m = makeCandles1m(200);
+      const result = await client.callTool({
+        name: 'analyze_multi_timeframe',
+        arguments: {
+          candles1m,
+          signal: { action: 'HOLD', confidence: 0 },
+        },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.confirmed).toBe(false);
+      expect(data.adjustedConfidence).toBe(0);
     });
   });
 });
