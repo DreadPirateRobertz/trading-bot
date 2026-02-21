@@ -7,6 +7,7 @@ import { computeRSI, computeMACD, computeBollingerBands, detectVolumeSpike, gene
 import { EnsembleStrategy } from '../strategies/ensemble.js';
 import { MomentumStrategy } from '../strategies/momentum.js';
 import { MeanReversionStrategy } from '../strategies/mean-reversion.js';
+import { MultiTimeframeAnalyzer } from '../analysis/multi-timeframe.js';
 
 export class SignalEngine {
   constructor({
@@ -17,6 +18,9 @@ export class SignalEngine {
     // Strategy backend: 'technical' (default), 'ensemble', 'momentum', 'meanReversion'
     strategy = 'technical',
     strategyConfig = {},
+    // Multi-timeframe confirmation (optional)
+    // Set to config object to enable, e.g. { timeframes: ['5m','15m','1h'], confirmationMode: 'majority' }
+    mtfConfig = null,
   } = {}) {
     this.rsiPeriod = rsiPeriod;
     this.macdParams = macdParams || { fast: 12, slow: 26, signal: 9 };
@@ -34,6 +38,9 @@ export class SignalEngine {
     } else {
       this.strategy = null; // 'technical' — use built-in indicators
     }
+
+    // Multi-timeframe analyzer (opt-in)
+    this.mtfAnalyzer = mtfConfig ? new MultiTimeframeAnalyzer(mtfConfig) : null;
   }
 
   // Analyze a single asset given its OHLCV data and optional sentiment
@@ -70,6 +77,28 @@ export class SignalEngine {
       });
     }
 
+    // Multi-timeframe confirmation: adjust confidence based on higher TF alignment
+    let mtfConfirmation = null;
+    if (this.mtfAnalyzer && candles && candles.length >= 100 && signal.action !== 'HOLD') {
+      mtfConfirmation = this.mtfAnalyzer.confirmSignal(signal, candles);
+      if (mtfConfirmation) {
+        signal = {
+          ...signal,
+          confidence: mtfConfirmation.adjustedConfidence,
+          mtfConfirmed: mtfConfirmation.confirmed,
+          mtfAlignment: mtfConfirmation.alignment,
+          reasons: [
+            ...(signal.reasons || []),
+            `MTF ${mtfConfirmation.confirmed ? 'confirmed' : 'opposed'} (alignment: ${mtfConfirmation.alignment})`,
+          ],
+        };
+        // Downgrade to HOLD if MTF strongly opposes and action is marginal
+        if (!mtfConfirmation.confirmed && mtfConfirmation.alignment < -0.2) {
+          signal = { ...signal, action: 'HOLD', mtfOverride: true };
+        }
+      }
+    }
+
     return {
       symbol,
       price,
@@ -77,6 +106,7 @@ export class SignalEngine {
       indicators: { rsi, macd, bollinger, volumeSpike },
       sentiment: sentiment || null,
       signal,
+      ...(mtfConfirmation ? { mtf: mtfConfirmation } : {}),
     };
   }
 
