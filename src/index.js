@@ -2,7 +2,7 @@
 // Orchestrates market data, sentiment analysis, signal generation, and trade execution
 
 export { AlpacaConnector, BinanceConnector } from './market-data/index.js';
-export { RedditCrawler, NewsCrawler, scoreSentiment, scoreRedditPost, scoreNewsArticle, aggregateScores } from './sentiment/index.js';
+export { RedditCrawler, NewsCrawler, TwitterCrawler, scoreSentiment, scoreRedditPost, scoreNewsArticle, scoreTweet, aggregateScores } from './sentiment/index.js';
 export { computeRSI, computeMACD, computeBollingerBands, detectVolumeSpike, generateSignal } from './signals/index.js';
 export { SignalEngine, generateSignalWithPrice } from './signals/engine.js';
 export { PositionSizer } from './signals/position-sizer.js';

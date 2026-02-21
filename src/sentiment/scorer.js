@@ -104,6 +104,25 @@ export function scoreNewsArticle(article, sentimentResult) {
   };
 }
 
+export function scoreTweet(tweet, sentimentResult) {
+  // Weight by engagement: likes + retweets + quotes, log-scaled
+  const engagement = Math.log2(Math.max(tweet.likes || 0, 1))
+    + Math.log2(Math.max(tweet.retweets || 0, 1)) * 1.5  // Retweets weighted more (amplification)
+    + Math.log2(Math.max(tweet.quotes || 0, 1)) * 1.2;   // Quotes indicate discourse
+
+  // Influencer boost: high-follower accounts get 2x weight
+  const influencerMultiplier = tweet.isInfluencer ? 2.0 : 1.0;
+
+  return {
+    ...sentimentResult,
+    source: 'twitter',
+    engagement,
+    authorFollowers: tweet.authorFollowers || 0,
+    isInfluencer: tweet.isInfluencer || false,
+    weightedScore: sentimentResult.score * engagement * influencerMultiplier,
+  };
+}
+
 export function aggregateScores(scores) {
   if (scores.length === 0) return { avgScore: 0, totalWeighted: 0, classification: 'neutral', count: 0 };
   const totalWeighted = scores.reduce((s, r) => s + r.weightedScore, 0);
