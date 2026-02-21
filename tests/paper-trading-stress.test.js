@@ -93,17 +93,22 @@ describe('PaperTrader stress tests', () => {
       expect(qty).toBe(50);
     });
 
-    it('calculatePositionSize with zero confidence returns zero (fixed: tb-1tl)', () => {
-      // FIXED: changed || to ?? so confidence=0 is now respected
+    it('calculatePositionSize returns 0 for zero confidence (fix: tb-1tl)', () => {
       const trader = new PaperTrader({ initialBalance: 100_000 });
       const qty = trader.calculatePositionSize(100, { confidence: 0 });
       expect(qty).toBe(0);
     });
 
-    it('calculatePositionSize uses 0.5 as default confidence', () => {
+    it('calculatePositionSize defaults to 0.5 for undefined confidence', () => {
       const trader = new PaperTrader({ initialBalance: 100_000, maxPositionPct: 0.10 });
       const qty = trader.calculatePositionSize(100, {});
-      // maxValue = 10000, scaled = 10000 * 0.5 = 5000, qty = 50
+      // maxValue=10000, scaled=10000*0.5=5000, qty=50
+      expect(qty).toBe(50);
+    });
+
+    it('calculatePositionSize defaults to 0.5 for null confidence', () => {
+      const trader = new PaperTrader({ initialBalance: 100_000, maxPositionPct: 0.10 });
+      const qty = trader.calculatePositionSize(100, { confidence: null });
       expect(qty).toBe(50);
     });
 
